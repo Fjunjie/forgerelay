@@ -1,0 +1,13 @@
+# 统一换行：目标平台为 Linux，源码与文本一律 LF 入库。
+* text=auto
+*.c text eol=lf
+*.h text eol=lf
+*.cc text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.cmake text eol=lf
+*.png binary
+*.jpg binary

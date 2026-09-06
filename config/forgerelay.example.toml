@@ -1,0 +1,26 @@
+# ForgeRelay 服务端示例配置（需求 §9.1）。
+# M3 起生效；CFG-01：启动时完整校验，字段无效拒绝启动。
+
+[server]
+listen = "127.0.0.1:7443"
+max_connections = 128
+worker_threads = 4
+
+[tls]
+enabled = true
+certificate = "/etc/forgerelay/server.crt"
+private_key = "/etc/forgerelay/server.key"
+
+[storage]
+root = "/var/lib/forgerelay"
+capacity_bytes = 107374182400
+high_watermark_percent = 85
+upload_session_hours = 24
+
+[database]
+path = "/var/lib/forgerelay/metadata.db"
+
+[logging]
+level = "info"
+format = "json"
+file = "/var/log/forgerelay/server.log"

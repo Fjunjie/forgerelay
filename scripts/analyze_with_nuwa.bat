@@ -44,6 +44,33 @@ echo  ForgeRelay Nuwa analysis: compiler=%COMPILER% jobs=%JOBS%
 echo  project: %PROJECT_DIR%
 echo ======================================================================
 
+echo [0/4] locate build tools
+rem cmake may not be on the machine PATH; resolution order:
+rem   1) CMAKE_DIR environment variable (its bin dir)
+rem   2) already on PATH
+rem   3) this workspace's dev toolchain: <project>\..\.tools\cmake-*\bin
+where cmake >nul 2>nul
+if not !errorlevel! equ 0 (
+    if defined CMAKE_DIR set "PATH=%CMAKE_DIR%;%PATH%"
+)
+where cmake >nul 2>nul
+if not !errorlevel! equ 0 (
+    for /d %%D in ("%PROJECT_DIR%\..\.tools\cmake-*") do (
+        if exist "%%D\bin\cmake.exe" set "PATH=%%D\bin;%PATH%"
+    )
+)
+where cmake >nul 2>nul
+if not !errorlevel! equ 0 (
+    echo [ERROR] cmake not found.
+    echo   Install it, e.g. "winget install Kitware.CMake", or set CMAKE_DIR
+    echo   to the directory containing cmake.exe, then rerun.
+    exit /b 3
+)
+echo   cmake resolved to:
+where cmake | findstr /I "cmake"
+where ninja >nul 2>nul || echo [WARN] ninja not found on PATH, cmake -G Ninja will fail
+where %CC% >nul 2>nul || echo [WARN] %CC% not found on PATH
+
 echo [1/4] nuw-config --%COMPILER%
 nuw-config --%COMPILER%
 if not !errorlevel! equ 0 (

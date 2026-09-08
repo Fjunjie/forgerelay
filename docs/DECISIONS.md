@@ -140,3 +140,56 @@ WinLibs GCC 16.2（真实 GNU GCC），`gcc-*` 预设本体在 Linux 上可直�
 M2 提供分配器配置点，足够覆盖测试需要。
 
 **影响**：无。如未来需要泄漏追踪，通过 ASan/Valgrind 外部工具完成。
+
+## D-13 SHA-256 后端：系统加密 API，不自研密码算法（SEC-01）
+
+**决策**：`fr::Sha256Stream` 为统一接口，双后端按平台编译选择——Linux（目标平台）用
+OpenSSL 3.x EVP；Windows（开发验证环境）用系统 CNG（BCrypt）。两后端均非自研实现。
+
+**备选**：(a) 自研 SHA-256——违反 SEC-01；(b) 仅 OpenSSL——本机无 OpenSSL 开发头文件，
+开发验证无法进行。
+
+**影响**：`fr_digest_ossl.cpp` 在 Linux 编译验证（目标环境复核项）；BCrypt 后端在本机
+由已知测试向量锁定（NIST FIPS 180-4）。
+
+## D-14 SQLite 获取：find_package 优先，FetchContent amalgamation 回退
+
+**决策**：与 GTest 同策略（D-10）。CMake 内置 `FindSQLite3` 命中系统包则用之；
+否则 FetchContent 拉取 sqlite.org 官方 amalgamation 3.46.0 编译为静态库 `fr_sqlite3`。
+
+**影响**：Linux 目标环境优先系统包；离线环境需预装 SQLite 开发包。仓库不含第三方源码。
+
+## D-15 块文件头部格式（FR-STO-03）
+
+**决策**：32 字节定长大端头：`"FRCH"`(4B) + version(1B) + reserved(1B) + raw_len(8B) +
+stored_len(8B) + CRC32 of data(4B) + reserved(4B)。首版不压缩，stored_len == raw_len
+（FR-STO-07），预留压缩后扩展。CRC 校验在**整块读取**时执行；部分读取（范围读）无法
+对齐整块 CRC，仅校验头部与长度。
+
+**备选**：每块尾部哈希（CRC32C 全文件）——需读全文件才能校验部分读，得不偿失。
+
+## D-16 C++ 层错误策略：异常 + 稳定 fr_status
+
+**决策**：存储层（C++20）以 `fr::Error` 异常传递错误，携带 C 核心库的稳定 `fr_status`
+码；M3/M4 的网络/CLI 边界统一捕获并映射到协议/退出码。C17 核心库仍返回错误码（D-01）。
+
+**备选**：C++ 层也返回码——大量样板且易被忽略；`std::expected`——C++23 才有。
+
+**影响**：事务用 RAII 守卫 `fr::Tx` 保证异常安全回滚（LIFE-04）。
+
+## D-17 范围读语义（FR-DL-04）
+
+**决策**：`read_artifact`/`get_range` 的范围 `[offset, offset+len)` 满足：
+`offset > size` 抛 `FR_E_RANGE`；`offset == size` 且 `len == 0` 合法（空读取）；
+`len` 超出文件尾时**截断**到文件尾。整体摘要始终为制品全量 SHA-256（空制品为
+`e3b0c442…b855`），提交时校验（FR-UP-08）。
+
+**影响**：单元测试锁定全部边界（首块/尾块/跨块/尾后零长/超尾截断/起点越界）。
+
+## D-18 会话 ID 与 GC 引用口径
+
+**决策**：会话 ID 取「纳秒时间戳 + 进程内原子计数」hex（同 D-09：唯一性而非机密性）。
+块的引用方为：`artifact_chunk`（已发布制品）+ 活动会话（OPEN/COMMITTING）的
+`upload_part`。删除制品/终止会话/会话过期时，将「当前无引用」的块标记
+`PENDING_DELETE`，超过保护期且 GC 时再次确认无引用才删文件（双重校验，FR-GC-02）。
+块被新上传复用时重新激活（`PENDING_DELETE` → `ACTIVE`）。

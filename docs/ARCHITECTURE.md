@@ -44,9 +44,10 @@ Application(forgerelayd/frctl)
 
 关键流程（帧解析）见 `docs/PROTOCOL.md`；错误模型见 `docs/DECISIONS.md` D-01/D-02。
 
+M2 已交付该层，见 §3a。
+
 ## 4. 后续里程碑预留（未实现，仅为结构占位）
 
-- M2 Storage：`src/storage/`（SQLite、chunk、manifest、session、recovery、GC）。
 - M3 Transport：`src/transport/`（epoll 单 I/O 线程 + 固定工作线程池 + 后台维护线程，§7.1）。
 - M4 CLI：`src/apps/frctl/`（命令解析、进度、退出码 CLI-03）。
 
@@ -55,3 +56,18 @@ Application(forgerelayd/frctl)
 单 epoll I/O 线程（监听 + 客户端连接 + 非阻塞读写）；固定大小工作线程池执行文件读写、
 哈希与数据库操作（ARCH-02）；工作队列有界，满时背压；后台维护线程处理过期与清理。
 首版允许互斥锁 + 条件变量，不要求无锁（§7.1）。
+
+## 3a. 存储层（M2 交付）
+
+`src/storage/` + `include/forgerelay/storage/*.hpp`（C++20，库 `frstorage`）：
+
+| 模块 | 职责 |
+|---|---|
+| `db/schema` | SQLite RAII、WAL、user_version 单事务迁移（DB-01..05），V1 含 §6 全部 8 张表 |
+| `digest` | SHA-256 流式摘要：Linux OpenSSL / Windows BCrypt 双后端（D-13） |
+| `chunk_store` | 内容寻址块文件：临时写入→fsync→原子 rename（FR-STO-04）、去重、块头校验（D-15） |
+| `storage`（门面） | 上传会话状态机（FR-UP-07）、原子发布（FR-STO-05）、范围读（D-17）、删除/分页（FR-ART）、GC（FR-GC）、启动恢复（FR-STO-06） |
+
+依赖规则：`storage → frcore + SQLite + 加密后端`，单向；时钟经 `StorageConfig.clock`
+注入（ARCH-04）；错误以 `fr::Error` 异常传递（D-16），边界映射在 M3/M4 落地。
+后台维护线程随 M3 服务化接入，M2 提供 `run_maintenance()` 幂等入口。

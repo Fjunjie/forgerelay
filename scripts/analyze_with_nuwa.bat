@@ -121,7 +121,7 @@ if !errorlevel! equ 0 (
 )
 
 echo [4/4] nuw-analyze
-nuw-analyze --dir "%IR_DIR%" -j %JOBS%
+nuw-analyze --dir "%IR_DIR%" -j %JOBS% --enable-security
 set "RC=!errorlevel!"
 if not "%RC%"=="0" (
     echo [ERROR] nuw-analyze failed rc=%RC%

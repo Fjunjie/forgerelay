@@ -37,3 +37,7 @@ Thumbs.db
 *.db
 *.db-wal
 *.db-shm
+
+# Nuwa (staticode) analysis artifacts
+build-nuwa/
+nuwa-ir/

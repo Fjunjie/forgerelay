@@ -42,6 +42,10 @@ const char *fr_status_name(fr_status code) {
         return "FR_E_CONFLICT";
     case FR_E_EXPIRED:
         return "FR_E_EXPIRED";
+    case FR_E_UNAUTHENTICATED:
+        return "FR_E_UNAUTHENTICATED";
+    case FR_E_FORBIDDEN:
+        return "FR_E_FORBIDDEN";
     default:
         return "FR_E_UNKNOWN";
     }
@@ -81,6 +85,10 @@ const char *fr_status_message(fr_status code) {
         return "content conflict";
     case FR_E_EXPIRED:
         return "object expired";
+    case FR_E_UNAUTHENTICATED:
+        return "authentication required";
+    case FR_E_FORBIDDEN:
+        return "permission denied";
     case FR_E_INTERNAL:
         return "internal error";
     default:
@@ -111,6 +119,8 @@ fr_category fr_status_category(fr_status code) {
     case FR_E_CONFLICT:
     case FR_E_EXPIRED:
     case FR_E_BUSY:
+    case FR_E_UNAUTHENTICATED:
+    case FR_E_FORBIDDEN:
         return FR_CAT_STATE;
     case FR_E_OVERFLOW:
     case FR_E_INTERNAL:

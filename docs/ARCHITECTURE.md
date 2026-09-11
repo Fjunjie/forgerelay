@@ -71,3 +71,18 @@ M2 已交付该层，见 §3a。
 依赖规则：`storage → frcore + SQLite + 加密后端`，单向；时钟经 `StorageConfig.clock`
 注入（ARCH-04）；错误以 `fr::Error` 异常传递（D-16），边界映射在 M3/M4 落地。
 后台维护线程随 M3 服务化接入，M2 提供 `run_maintenance()` 幂等入口。
+
+## 3b. 协议服务与 CLI（M3/M4 交付）
+
+`src/transport/`（frtransport）、`src/service/`（frservice）、`src/client/`（frclient）、
+`src/apps/`（forgerelayd、frctl）：
+
+- **transport**：单 I/O 线程 `Poller`（epoll/WSAPoll 双后端，D-19）+ 连接表 + 有界任务
+  队列 + 固定工作线程池 + 完成队列与唤醒通道。I/O 线程仅做帧组装与写出；
+  GET 分片续传经任务队列链式推进（每片 1 MiB，D-24）。
+- **service**：`Dispatcher` 全部 26 种消息 → Storage/AuthRegistry；角色矩阵（§2.1）、
+  认证限流（FR-AUTH-05）、审计（FR-ADM-05）；存储调用经 `impl.mu` 串行化
+  （M2 Storage 非线程安全，DB-05 写事务短）。`AuthRegistry` 独立 SQLite 连接（D-22）。
+- **client**：阻塞式请求/响应 + DATA 流接收；frctl 全部 §10 命令、CLI-01..04。
+- **log/config**：JSON 行日志五级 + 轮转（LOG-01..04）；TOML 配置完整校验（CFG-01/02，
+  toml++ D-21）。

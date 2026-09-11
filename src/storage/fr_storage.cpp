@@ -859,4 +859,80 @@ uint64_t Storage::used_bytes()
     return 0;
 }
 
+int64_t Storage::artifact_count()
+{
+    Impl &impl = *impl_;
+    Statement s(impl.db, "SELECT COUNT(*) FROM artifact");
+    return s.step() ? s.column_int(0) : 0;
+}
+
+Storage::SessionProgress Storage::session_progress(const std::string &session_id)
+{
+    Impl &impl = *impl_;
+    const SessionInfo session = impl.load_session(session_id);
+    SessionProgress progress;
+    progress.chunk_count =
+        session.expected_size == 0
+            ? 0
+            : (session.expected_size + session.chunk_size - 1) / session.chunk_size;
+    Statement s(impl.db, "SELECT ordinal FROM upload_part WHERE session_id=?1 ORDER BY ordinal");
+    s.bind_text(1, session_id);
+    while (s.step()) {
+        progress.present_ordinals.push_back(static_cast<uint64_t>(s.column_int(0)));
+    }
+    return progress;
+}
+
+uint64_t Storage::read_artifact_slice(const std::string &ns, const std::string &name,
+                                      const std::string &version, uint64_t offset, uint64_t max_len,
+                                      const Sink &sink)
+{
+    if (!sink) {
+        throw_error(FR_E_ARG, "read_artifact_slice requires a sink");
+    }
+    const ArtifactInfo info = show_artifact(ns, name, version);
+    if (offset > info.size) {
+        throw_error(FR_E_RANGE, "read offset beyond artifact size");
+    }
+    uint64_t remaining = info.size - offset;
+    if (remaining > max_len) {
+        remaining = max_len;
+    }
+
+    Impl &impl = *impl_;
+    fr_buf buffer;
+    fr_buf_init(&buffer);
+    uint64_t sent = 0;
+    try {
+        for (const ManifestEntry &entry : info.chunks) {
+            if (remaining == 0) {
+                break;
+            }
+            const uint64_t chunk_end = entry.offset + entry.length;
+            if (offset >= chunk_end) {
+                continue;
+            }
+            if (entry.offset >= offset + remaining) {
+                break;
+            }
+            const uint64_t local_offset = offset > entry.offset ? offset - entry.offset : 0;
+            uint64_t take = chunk_end - (offset > entry.offset ? offset : entry.offset);
+            if (take > remaining) {
+                take = remaining;
+            }
+            fr_buf_clear(&buffer);
+            impl.chunks.get_range(entry.digest, local_offset, static_cast<size_t>(take), &buffer);
+            sink(buffer.data, buffer.len);
+            remaining -= take;
+            offset += take;
+            sent += take;
+        }
+    } catch (...) {
+        fr_buf_destroy(&buffer);
+        throw;
+    }
+    fr_buf_destroy(&buffer);
+    return sent;
+}
+
 } // namespace fr

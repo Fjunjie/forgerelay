@@ -25,7 +25,8 @@
 ## 各里程碑引入计划
 
 - **M1**：GoogleTest（测试）。核心库自身零第三方依赖。
-- **M2（当前）**：SQLite（`find_package(SQLite3)` 优先，FetchContent 官方 amalgamation 3.46.0 回退，见 `cmake/GetSQLite3.cmake`）。
+- **M2**：SQLite（`find_package(SQLite3)` 优先，FetchContent 官方 amalgamation 3.46.0 回退，见 `cmake/GetSQLite3.cmake`）。
+- **M3/M4（当前）**：toml++ v3.4.0（TOML 配置解析，D-21）。
 - **M3**：OpenSSL。
 - **M4**：tomlc99 或 toml++（TOML 配置解析，§12.2 许可：tomlc99 MIT / toml++ MIT）。
 

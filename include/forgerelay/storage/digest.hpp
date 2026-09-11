@@ -66,6 +66,13 @@ std::string sha256_to_hex(const Sha256 &digest);
  */
 Sha256 sha256_from_hex(const std::string &hex);
 
+/**
+ * 生成 32 字节密码学安全随机数（SEC-01：来自系统加密 API，D-13）。
+ *
+ * @return 随机字节；系统 API 失败时抛 fr::Error(FR_E_INTERNAL)。
+ */
+Sha256 random_bytes();
+
 } // namespace fr
 
 #endif /* FR_STORAGE_DIGEST_HPP */

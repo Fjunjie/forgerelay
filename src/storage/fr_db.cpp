@@ -186,4 +186,10 @@ std::string Statement::column_text(int index) const
     return std::string(reinterpret_cast<const char *>(text), static_cast<size_t>(bytes));
 }
 
+
+int64_t fr::Database::changes() const
+{
+    return handle_ != nullptr ? sqlite3_changes(handle_) : 0;
+}
+
 } // namespace fr

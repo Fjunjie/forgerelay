@@ -13,6 +13,9 @@ set(FR_UNIT_TEST_SOURCES
 set(FR_PROTOCOL_TEST_SOURCES
     protocol/test_frame.cc
 )
+set(FR_E2E_TEST_SOURCES
+    e2e/test_m3m4_e2e.cc
+)
 set(FR_STORAGE_TEST_SOURCES
     storage/test_digest.cc
     storage/test_db.cc
@@ -22,6 +25,17 @@ set(FR_STORAGE_TEST_SOURCES
     storage/test_storage_maintenance.cc
     storage/test_integration_m2.cc
 )
+
+foreach(_src IN LISTS FR_E2E_TEST_SOURCES)
+    get_filename_component(_name "${_src}" NAME_WE)
+    add_executable(${_name} ${_src})
+    target_link_libraries(${_name} PRIVATE frclient frtransport GTest::gtest_main)
+    fr_apply_warnings(${_name} cxx)
+    fr_apply_sanitizers(${_name})
+    gtest_discover_tests(${_name}
+        DISCOVERY_TIMEOUT 60
+        EXTRA_ARGS --gtest_color=yes)
+endforeach()
 
 foreach(_src IN LISTS FR_UNIT_TEST_SOURCES FR_PROTOCOL_TEST_SOURCES)
     get_filename_component(_name "${_src}" NAME_WE)

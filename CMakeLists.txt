@@ -24,14 +24,29 @@ include(sanitizers)
 option(FR_BUILD_TESTS "Build ForgeRelay tests" ON)
 option(FR_WERROR "Treat warnings as errors in ForgeRelay targets" ON)
 
-# 子目录存在性守卫：允许“仅骨架”或“仅核心库”的最小构建（如离线无 GTest 时
-# 配 -DFR_BUILD_TESTS=OFF）。
+# 子目录存在性守卫：允许“仅骨架”或分层最小构建（如离线时 -DFR_BUILD_TESTS=OFF）。
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core_c/CMakeLists.txt")
     add_subdirectory(src/core_c)
 endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/storage/CMakeLists.txt")
     add_subdirectory(src/storage)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/service/CMakeLists.txt")
+    add_subdirectory(src/service)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/transport/CMakeLists.txt")
+    add_subdirectory(src/transport)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/client/CMakeLists.txt")
+    add_subdirectory(src/client)
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/apps/CMakeLists.txt")
+    add_subdirectory(src/apps)
 endif()
 
 if(FR_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")

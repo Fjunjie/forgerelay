@@ -10,8 +10,8 @@
 | M0 工程骨架 | 仓库、CMake、目录、规范、示例配置、基础测试 | **完成**（本轮） |
 | M1 核心库 | buffer、checked arithmetic、codec（帧编解码）、path、fd、error | **完成**（本轮） |
 | M2 存储 | SQLite、chunk、manifest、session、recovery、GC | **完成**（m2 分支） |
-| M3 协议服务 | epoll、TLS、frame、连接状态、请求分发 | 未开始 |
-| M4 CLI 与权限 | frctl、用户、令牌、角色授权、审计、状态查询 | 未开始 |
+| M3 协议服务 | epoll、TLS、frame、连接状态、请求分发 | **完成**（m3-m4 分支；TLS 后端待 Linux 复核，D-20） |
+| M4 CLI 与权限 | frctl、用户、令牌、角色授权、审计、状态查询 | **完成**（m3-m4 分支） |
 | M5 完善交付 | 并发、错误场景、资源限制、文档、安装示例 | 未开始 |
 
 ## 2. 需求编号 → 任务映射
@@ -334,3 +334,47 @@ M2 退出条件核对：本地上传提交、下载和恢复测试通过 ✔。
 
 环境说明：SHA-256 的 OpenSSL 后端（`fr_digest_ossl.cpp`）与 `fr_fd.c` 的 POSIX 主分支
 运行级验证需在 Linux 目标环境复核（同 D-08/D-13，M3 前置任务）。
+
+### 4.6 M3 协议服务 + M4 CLI 与权限（m3-m4 分支）
+
+完成项：
+
+- **M3 传输层**（`src/transport/` + `include/forgerelay/transport.hpp`）：单 I/O 线程
+  Poller（Linux epoll / Windows WSAPoll，D-19）+ 固定工作线程池（有界队列、满时 busy，
+  §7.1/§7.3）+ 完成队列与唤醒通道 + 空闲扫描 + 优雅停止（LIFE-05）。分发器直接产出
+  完整帧，I/O 线程零哈希/零数据库操作（ARCH-02）。
+- **M3/M4 服务层**（`src/service/` + `include/forgerelay/service.hpp`）：全部 26 种消息
+  分发（§5.3，payload 规范见 PROTOCOL.md §6）；AuthRegistry 独立 SQLite 连接
+  （D-22）实现用户/令牌（FR-AUTH-01..03）、角色矩阵（§2.1，FR-AUTH-04）、
+  速率限制（FR-AUTH-05）、审计（FR-ADM-05）。
+- **M4 应用**：`forgerelayd`（配置 CFG-01/02 + --create-admin 引导 + 信号优雅退出）、
+  `frctl`（§10 全部命令，CLI-01..04：--server/--token/--json/--verbose/--confirm、
+  稳定退出码 CLI-03、上传/下载进度 CLI-04）；阻塞客户端库 `frclient`。
+- **依赖**：toml++ v3.4.0（D-21）。
+- **测试**：E2E 7 场景（HELLO/STATUS、上传提交查询下载全链路、权限矩阵正反向
+  TEST-02 #8、令牌生命周期、认证限流、审计、并发客户端冒烟）+ log/config/messages
+  单元测试，合计 168 例。
+
+构建与测试结果（全部 -Werror 零警告）：
+
+| 配置 | 编译器 | 结果 |
+|---|---|---|
+| clang-debug / ubsan / asan / release | Clang 22.1.8 | 168/168 |
+| gcc-debug / release（本地实测） | GNU GCC 16.2.0 | 168/168 |
+
+生产代码量（scc，include+src）：8,211 行（C++ 5,532 + 头 1,082 + C 1,488 + C 头 312 +
+CMake 109），合计 54 文件，未超 20,000 上限。
+
+调试期间 ASan 捕获并修复的实际缺陷（价值记录）：
+
+- worker 的 `Completion.bytes` 未初始化 + `HandleResult` 浅拷贝赋值 → **双重释放**
+  （挂死根源，ASan double-free 报告定位）。
+- GET 分片续传：续传任务的 has_more 被忽略、continuation_key 未随结果传递 → 下载链
+  在第 2 片后停滞（连接 5s 超时暴露）。
+- 客户端析构 WSACleanup 清空 Winsock 引用计数 → 后续连接随机失败（D-23）。
+
+M3/M4 退出条件核对：协议测试（M1 帧层 + M3 E2E）与基本端到端流程通过 ✔；frctl 全部
+命令与权限测试通过 ✔。
+
+环境说明：epoll/TLS/OpenSSL 后端与 POSIX fd 主分支的运行级验证需在 Linux 目标环境
+复核（D-08/D-13/D-19/D-20，M5 前置任务）。

@@ -198,6 +198,21 @@ public:
     /** 当前活跃块字节数（容量计算口径）。 */
     uint64_t used_bytes();
 
+    /** 已发布制品总数（STATUS 用）。 */
+    int64_t artifact_count();
+
+    /** 上传会话进度：期望块数与已登记块序号（QUERY_UPLOAD 用）。 */
+    struct SessionProgress {
+        uint64_t chunk_count = 0;
+        std::vector<uint64_t> present_ordinals;
+    };
+    SessionProgress session_progress(const std::string &session_id);
+
+    /** 限量范围读：读取 min(max_len, size-offset) 字节，返回实际字节数（DATA 分片用）。 */
+    uint64_t read_artifact_slice(const std::string &ns, const std::string &name,
+                                 const std::string &version, uint64_t offset, uint64_t max_len,
+                                 const Sink &sink);
+
 private:
     Storage() = default;
     struct Impl;

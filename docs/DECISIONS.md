@@ -193,3 +193,84 @@ stored_len(8B) + CRC32 of data(4B) + reserved(4B)。首版不压缩，stored_len
 `upload_part`。删除制品/终止会话/会话过期时，将「当前无引用」的块标记
 `PENDING_DELETE`，超过保护期且 GC 时再次确认无引用才删文件（双重校验，FR-GC-02）。
 块被新上传复用时重新激活（`PENDING_DELETE` → `ACTIVE`）。
+
+## D-23 Winsock 生命周期：进程级初始化，不配对清理
+
+**决策**：Windows 开发分支中 `WSAStartup` 在首次使用时执行（进程内一次），**不调用
+`WSACleanup`**——客户端/服务端对象随测试与应用反复生灭，配对清理会把引用计数清零导致
+后续 Winsock 调用全部失败（实测："cannot resolve server address" 间歇出现）。
+
+**影响**：进程退出时操作系统回收；仅影响 Windows 开发分支，Linux 目标平台无此问题。
+
+## D-19 事件循环平台层：Linux epoll / Windows WSAPoll
+
+**决策**：M3 单 I/O 线程的事件循环封装为 `Poller` 接口，双后端按平台编译——Linux 用
+epoll（目标平台，§7.1），Windows 开发验证用 WSAPoll。语义对齐（级别触发 + 500ms 超时
+轮询空闲扫描）。唤醒通道用一对本机互连 TCP socket（跨平台自管道技巧）。
+
+**影响**：epoll 后端在 Linux 目标环境复核（D-08 同类前置任务）；Windows 分支已由全部
+E2E 测试运行验证。
+
+## D-20 TLS 首版范围：Linux OpenSSL 后端，Windows 开发分支回环明文
+
+**决策**：TLS 1.3（SEC-01/02）规划为 OpenSSL 后端；Windows 开发分支无 OpenSSL 依赖，
+`tls.enabled=true` 时启动直接报错拒绝；回环监听允许关闭 TLS（§5.1 明确允许）。
+
+**影响**：全部 E2E 测试在回环明文下运行；TLS 后端随 Linux 复核任务落地（M5 前置）。
+
+## D-21 TOML 解析选 toml++（tomlplusplus v3.4.0）
+
+**决策**：§12.2 允许 tomlc99 或 toml++；选 toml++——有正式 release tag（可复现
+FetchContent）、单头库集成开销最小。头文件以 SYSTEM 引入，警告矩阵不适用。
+
+## D-22 AuthRegistry 独立 SQLite 连接
+
+**决策**：鉴权注册表（user/token/audit）打开**自己的** SQLite 连接（同 metadata.db
+文件），与 Storage 的连接分离；各自内部互斥。WAL 模式支持一写多读，避免跨模块共享
+同一 sqlite3 句柄的线程安全问题。
+
+**影响**：跨连接写入依赖 busy_timeout（DB-01）+ WAL；审计为追加写（§6）。
+
+## D-23 Winsock 生命周期：进程级初始化，不配对清理（Windows 开发分支）
+
+**决策**：Windows 分支中 `WSAStartup` 进程内一次，**不调用 `WSACleanup`**——客户端/
+服务端对象随测试反复生灭，配对清理会把引用计数清零，后续 Winsock 调用全部失败
+（实测 gai=10093 WSANOTINITIALISED 间歇出现）。
+
+**影响**：进程退出时由操作系统回收；Linux 无此问题。SERVER 的 start/stop 仍配对。
+
+## D-24 GET 分片续传的状态传递
+
+**决策**：下载分片链的状态（GetState）由 Dispatcher 持有（键 `get-<conn>-<seq>`）；
+`HandleResult.has_more=true` 时**必须**同时携带 `continuation_key`，工作线程据此把
+下一段入队（对续传任务自身同样生效）。分片大小固定 1 MiB（AC-06：不整载内存）。
+到达制品尾（实际读取 0 字节）即发最终 OK。
+
+**影响**：实测教训——续传任务的 has_more 曾被忽略、continuation_key 曾未传递，均被
+E2E 测试捕获（连接 5s 超时）；测试对这类链式协议 bug 的价值得到验证。
+
+## D-25 审计裁定：GET 续传 state_key 不引入随机化（code-hawk-uat #1 高危裁定为误报）
+
+**背景**：PR #2 审计（code-hawk-uat）将 `get-<conn_id>-<seq>` 续传状态键的可预测性
+评为高危会话劫持（CWE-330），建议改为加密随机或 HMAC 签名。
+
+**裁定**：**不采纳**。该键仅存在于服务器进程内部的 `Dispatcher::Impl::gets` 映射中，
+用于工作线程任务队列的续传寻址——**不在协议面传输，客户端与攻击者均不可见、不可控**
+（GET 响应是 DATA/OK 帧，无需客户端回传任何键）。`handle_get_continue` 亦非网络可达
+接口。可预测性对纯内部寻址键无安全影响；引入随机/HMAC 反而增加无收益的复杂度
+（与 D-09「内部标识取唯一性而非机密性」同一原则）。
+
+**同时确认的真实问题并已修复**：该审计关联指出的连接断开后 `gets` 条目残留
+（内存泄漏/状态累积，原 #3 中危）成立——已在 `Dispatcher::on_connection_closed()`
+中修复，传输层关闭连接时清除该连接的全部续传状态。
+
+## D-26 审计修复记录（code-hawk-uat，PR #2，共 6 项：1 高危 5 中危）
+
+| # | 级别 | 位置 | 问题 | 裁定 | 处理 |
+|---|---|---|---|---|---|
+| 1 | 🔴 | fr_dispatch GET case | state_key 可预测 | 误报（D-25：键非协议面） | 记录裁定 |
+| 2 | 🟡 | log.hpp open() | open/close 未加锁违反线程安全承诺 | 合理 | open/close 加互斥锁；close 拆出无锁内部路径 |
+| 3 | 🟡 | fr_dispatch gets | 连接断开后续传状态残留 | 合理（真实泄漏/DoS 向量） | on_connection_closed + 传输层关闭时调用 |
+| 4 | 🟡 | fr_dispatch 限流 | 封禁计时用 system_clock | 合理（CWE-203） | 改用 steady_clock 单调秒 |
+| 5 | 🟡 | fr_messages 位图 | 编码端缺 u32 溢出检查 | 合理且加重：恶意 expected_size 可使位图膨胀至 GB 级 | 编码端 1 MiB 上限 + QUERY 处理器拒绝超限会话 |
+| 6 | 🟡 | fr_server Wakeup | connect/accept 失败路径泄漏 writer | 合理（CWE-404） | 错误分支补 close_socket(writer) |

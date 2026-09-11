@@ -71,6 +71,9 @@ public:
     /** 底层句柄（供语句封装使用）。 */
     sqlite3 *handle() const noexcept { return handle_; }
 
+    /** 最近一次语句影响的行数。 */
+    int64_t changes() const;
+
 private:
     sqlite3 *handle_ = nullptr;
 };

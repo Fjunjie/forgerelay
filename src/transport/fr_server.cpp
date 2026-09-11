@@ -380,6 +380,9 @@ struct Server::Impl {
     Dispatcher *dispatcher = nullptr;
     StatusHub *hub = nullptr;
     Logger *log = nullptr;
+#ifdef FR_HAVE_OPENSSL
+    std::unique_ptr<tls::ServerCtx> tls_ctx; // tls.enabled 且后端可用时创建（D-20）
+#endif
 
     fr_socket_t listen_fd = kInvalidSocket;
     net::Wakeup wakeup;
@@ -402,7 +405,34 @@ struct Server::Impl {
         int64_t last_active = 0;
         std::shared_ptr<ClientSession> session; // 任务与连接共享（生命周期，LIFE-03）
         bool close_after_flush = false;
+#ifdef FR_HAVE_OPENSSL
+        std::unique_ptr<tls::Session> tls; // TLS 关闭时为空（明文路径，D-20）
+        bool tls_handshaking = false;
+        bool tls_want_read = true;
+        bool tls_want_write = false;
+#endif
     };
+
+    /* 统一收发路由：TLS 会话存在时走 SSL，否则走明文 socket（语义对齐）。 */
+    int64_t read_from(Connection &conn, uint8_t *buf, size_t len)
+    {
+#ifdef FR_HAVE_OPENSSL
+        if (conn.tls) {
+            return conn.tls->read(buf, static_cast<int>(len));
+        }
+#endif
+        return net::read_some(conn.fd, buf, len);
+    }
+
+    int64_t write_to(Connection &conn, const uint8_t *buf, size_t len)
+    {
+#ifdef FR_HAVE_OPENSSL
+        if (conn.tls) {
+            return conn.tls->write(buf, static_cast<int>(len));
+        }
+#endif
+        return net::write_some(conn.fd, buf, len);
+    }
 
     std::mutex conns_mu; // 保护 connections（仅 I/O 线程读写，accept 回调外无竞争；保守加锁）
     std::map<uint64_t, Connection> connections;
@@ -490,7 +520,6 @@ struct Server::Impl {
             }
         }
     }
-
     void close_connection_locked(uint64_t conn_id, Poller &poller_ref)
     {
         auto it = connections.find(conn_id);
@@ -502,9 +531,12 @@ struct Server::Impl {
         fr_frame_parser_destroy(&it->second.parser);
         fr_buf_destroy(&it->second.outbox);
         connections.erase(it);
-        /* 清理该连接的 GET 续传状态（审计 #3，CWE-404）。
-         * 锁顺序：此处持 conns_mu 再取 dispatcher 内部锁，与工作线程
-         * （先短暂取 conns_mu 释放、再在 handle 中取自身锁）无相反顺序 ✓。 */
+        if (hub != nullptr) {
+            hub->connections.store(static_cast<uint32_t>(connections.size()));
+        }
+        /* 清理该连接的 GET 续传状态（审计 #3，CWE-404）。锁顺序：
+         * 此处持 conns_mu 再取 dispatcher 内部锁，与工作线程（先短暂取
+         * conns_mu 释放、再在 handle 中取自身锁）无相反顺序 ✓。 */
         dispatcher->on_connection_closed(conn_id);
     }
 
@@ -635,6 +667,15 @@ struct Server::Impl {
             fr_frame_parser_init(&conn.parser);
             fr_buf_init(&conn.outbox);
             conn.session = std::make_shared<ClientSession>();
+#ifdef FR_HAVE_OPENSSL
+            if (tls_ctx != nullptr) {
+                /* TLS：连接进入握手状态机，完成前不读取业务数据（D-20）。 */
+                conn.tls = std::make_unique<tls::Session>();
+                conn.tls->accept_server(*tls_ctx, client);
+                conn.tls_handshaking = true;
+                conn.tls_want_read = true;
+            }
+#endif
             poller.add(client, true, false);
             {
                 std::lock_guard<std::mutex> lock(conns_mu);
@@ -676,6 +717,7 @@ struct Server::Impl {
             }
             drain_completions();
             flush_writable();
+            sweep_idle();
         }
     }
 
@@ -695,11 +737,45 @@ struct Server::Impl {
             return;
         }
 
+        /* TLS 握手状态机（审计无关；D-20）：先于数据读取驱动 SSL_accept，
+         * WANT_READ/WANT_WRITE 通过 Poller 订阅对应就绪条件。 */
+#ifdef FR_HAVE_OPENSSL
+        {
+            std::lock_guard<std::mutex> lock(conns_mu);
+            auto it = connections.find(conn_id);
+            if (it == connections.end()) {
+                return;
+            }
+            Connection &conn = it->second;
+            if (conn.tls && conn.tls_handshaking) {
+                bool want_read = false;
+                bool want_write = false;
+                if (conn.tls->drive_handshake(want_read, want_write) == 1) {
+                    conn.tls_handshaking = false;
+                    poller.mod(conn.fd, true, conn.outbox.len != 0);
+                    return;
+                }
+                conn.tls_want_read = want_read;
+                conn.tls_want_write = want_write;
+                poller.mod(conn.fd, want_read, want_write);
+                return; // 握手未完成前不读业务数据
+            }
+        }
+#endif
+
         if (ev.readable) {
             uint8_t buf[65536];
             bool keep = true;
             while (keep) {
-                const int64_t n = net::read_some(ev.fd, buf, sizeof(buf));
+                int64_t n = 0;
+                {
+                    std::lock_guard<std::mutex> lock(conns_mu);
+                    auto it = connections.find(conn_id);
+                    if (it == connections.end()) {
+                        return;
+                    }
+                    n = read_from(it->second, buf, sizeof(buf));
+                }
                 if (n < 0) {
                     std::lock_guard<std::mutex> lock(conns_mu);
                     close_connection_locked(conn_id, poller);
@@ -775,7 +851,14 @@ struct Server::Impl {
                 return;
             }
             Connection &conn = it->second;
-            poller.mod(conn.fd, true, conn.outbox.len != 0);
+#ifdef FR_HAVE_OPENSSL
+            if (conn.tls && conn.tls_handshaking) {
+                poller.mod(conn.fd, conn.tls_want_read, conn.tls_want_write);
+            } else
+#endif
+            {
+                poller.mod(conn.fd, true, conn.outbox.len != 0);
+            }
             if (conn.close_after_flush && conn.outbox.len == 0) {
                 close_connection_locked(conn_id, poller);
             }
@@ -821,7 +904,7 @@ struct Server::Impl {
         }
         Connection &conn = it->second;
         while (conn.outbox.len != 0) {
-            const int64_t n = net::write_some(conn.fd, conn.outbox.data, conn.outbox.len);
+            const int64_t n = write_to(conn, conn.outbox.data, conn.outbox.len);
             if (n < 0) {
                 close_connection_locked(conn_id, poller);
                 return;
@@ -843,6 +926,7 @@ struct Server::Impl {
         {
             std::lock_guard<std::mutex> lock(conns_mu);
             for (const auto &pair : connections) {
+                std::fprintf(stderr, "[dbg] sweep conn=%llu fd=%d peer=%s idle=%lld\n", (unsigned long long)pair.first, (int)pair.second.fd, pair.second.peer.c_str(), (long long)(now - pair.second.last_active));
                 if (now - pair.second.last_active > settings->request_timeout_seconds) {
                     expired.push_back(pair.first);
                 }
@@ -897,6 +981,19 @@ std::unique_ptr<Server> Server::start(const ServerSettings &settings, Storage &s
     if (getsockname(impl.listen_fd, reinterpret_cast<sockaddr *>(&addr), &len) == 0) {
         impl.port = ntohs(addr.sin_port);
     }
+
+#ifdef FR_HAVE_OPENSSL
+    if (settings.tls.enabled) {
+        impl.tls_ctx = std::make_unique<tls::ServerCtx>();
+        impl.tls_ctx->init(settings.tls.certificate, settings.tls.private_key);
+        logger.info("TLS 1.3 enabled (SEC-01/02)");
+    }
+#else
+    if (settings.tls.enabled) {
+        throw_error(FR_E_ARG, "TLS backend unavailable in this build (no OpenSSL); "
+                              "use a loopback listener with tls.enabled = false (D-20)");
+    }
+#endif
 
     logger.info("forgerelayd listening on " + host_out + ":" + std::to_string(impl.port));
 

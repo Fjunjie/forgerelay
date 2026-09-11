@@ -1,5 +1,6 @@
 // fr_client.cpp - 阻塞式客户端实现。
 #include "forgerelay/client.hpp"
+#include "forgerelay/tls.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -109,12 +110,50 @@ struct Client::Impl {
     fr_buf inbuf;   // 接收缓冲（保留跨帧遗留字节，PROTO-01）
     size_t inpos = 0;
     bool connected = false;
+#if defined(FR_HAVE_OPENSSL)
+    std::unique_ptr<tls::ClientCtx> tls_ctx;
+    std::unique_ptr<tls::Session> tls; // use_tls 时存在（D-20）
+#endif
 
     Impl() {
         fr_buf_init(&inbuf);
     }
     ~Impl() {
         fr_buf_destroy(&inbuf);
+    }
+
+    /** 统一发送路由：TLS 会话存在时走 SSL。 */
+    void send_bytes(const uint8_t *data, size_t len)
+    {
+#if defined(FR_HAVE_OPENSSL)
+        if (tls) {
+            size_t off = 0;
+            while (off < len) {
+                const int n = tls->write(data + off, static_cast<int>(len - off));
+                if (n <= 0) {
+                    throw_error(FR_E_IO, "connection lost while sending (tls)");
+                }
+                off += static_cast<size_t>(n);
+            }
+            return;
+        }
+#endif
+        send_all(fd, data, len);
+    }
+
+    /** 统一接收路由：读取至少 1 字节。 */
+    size_t recv_bytes(uint8_t *buf, size_t len)
+    {
+#if defined(FR_HAVE_OPENSSL)
+        if (tls) {
+            const int n = tls->read(buf, static_cast<int>(len));
+            if (n <= 0) {
+                throw_error(FR_E_IO, "connection lost while receiving (tls)");
+            }
+            return static_cast<size_t>(n);
+        }
+#endif
+        return recv_some(fd, buf, len);
     }
 };
 
@@ -131,7 +170,7 @@ Client::~Client()
             fr_buf payload;
             fr_buf_init(&payload);
             fr_frame_encode(&payload, FR_MSG_CLOSE, 0, 1, nullptr, 0);
-            send_all(impl_->fd, payload.data, payload.len);
+            impl_->send_bytes(payload.data, payload.len);
             fr_buf_destroy(&payload);
         } catch (...) {
             // 析构尽力而为
@@ -172,6 +211,24 @@ void Client::connect()
         throw_error(FR_E_IO, "cannot connect to " + impl.options.host + ":" + port);
     }
     set_timeout(impl.fd, impl.options.timeout_seconds);
+
+    /* TLS 握手（SEC-02；D-20：无 OpenSSL 构建请求 TLS 时明确报错）。 */
+#if defined(FR_HAVE_OPENSSL)
+    if (impl.options.use_tls) {
+        impl.tls_ctx = std::make_unique<tls::ClientCtx>();
+        impl.tls_ctx->init();
+        impl.tls = std::make_unique<tls::Session>();
+        impl.tls->connect_client(*impl.tls_ctx, impl.fd,
+                                 impl.options.tls_hostname.empty()
+                                     ? impl.options.host
+                                     : impl.options.tls_hostname);
+    }
+#else
+    if (impl.options.use_tls) {
+        throw_error(FR_E_IO, "TLS unavailable in this build (no OpenSSL); use a "
+                             "loopback/plain connection or rebuild with OpenSSL");
+    }
+#endif
     impl.connected = true;
 
     /* HELLO 握手。 */
@@ -219,8 +276,32 @@ fr_frame Client::read_frame()
             }
         }
         uint8_t chunk[65536];
-        const size_t n = recv_some(impl.fd, chunk, sizeof(chunk));
+        const size_t n = impl.recv_bytes(chunk, sizeof(chunk));
         fr_buf_append(&impl.inbuf, chunk, n);
+    }
+}
+
+void Client::send_raw_frame(uint8_t type, const void *payload, size_t len)
+{
+    Impl &impl = *impl_;
+    fr_buf out;
+    fr_buf_init(&out);
+    const fr_status st = fr_frame_encode(&out, type, 0,
+        static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffffu) | 1u,
+        payload, len);
+    if (st != FR_OK) {
+        fr_buf_destroy(&out);
+        throw_error(st, "encode raw frame failed");
+    }
+    send_all(impl.fd, out.data, out.len);
+    fr_buf_destroy(&out);
+}
+
+void Client::send_garbage(const std::string &bytes)
+{
+    Impl &impl = *impl_;
+    if (!bytes.empty()) {
+        send_all(impl.fd, reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size());
     }
 }
 
@@ -236,7 +317,7 @@ fr_frame Client::request(uint8_t type, const fr_buf &payload)
         fr_buf_destroy(&out);
         throw_error(st, "encode request failed");
     }
-    send_all(impl.fd, out.data, out.len);
+    impl.send_bytes(out.data, out.len);
     fr_buf_destroy(&out);
 
     fr_frame frame = read_frame();

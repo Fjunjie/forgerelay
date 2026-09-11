@@ -9,7 +9,7 @@
 |---|---|---|
 | M0 工程骨架 | 仓库、CMake、目录、规范、示例配置、基础测试 | **完成**（本轮） |
 | M1 核心库 | buffer、checked arithmetic、codec（帧编解码）、path、fd、error | **完成**（本轮） |
-| M2 存储 | SQLite、chunk、manifest、session、recovery、GC | 未开始 |
+| M2 存储 | SQLite、chunk、manifest、session、recovery、GC | **完成**（m2 分支） |
 | M3 协议服务 | epoll、TLS、frame、连接状态、请求分发 | 未开始 |
 | M4 CLI 与权限 | frctl、用户、令牌、角色授权、审计、状态查询 | 未开始 |
 | M5 完善交付 | 并发、错误场景、资源限制、文档、安装示例 | 未开始 |
@@ -303,4 +303,34 @@ M1 退出条件核对：核心库单元测试全部通过 ✔；ASan/UBSan 通�
   - `fr_fd.c` 的 **POSIX 主分支在本机不参与编译**（本机编译 `_WIN32` 适配分支）：其语法已尽力保证，但
     **运行级验证（fsync、O_EXCL、rename 原子性、目录同步、`_FILE_OFFSET_BITS=64`）必须在 Linux 目标环境执行**
     （`cmake --preset gcc-debug` / `clang-asan` 直接复跑），列为 M2 前置任务。
-- 未完成项：M2 起的全部存储/网络/CLI 功能（见第 2 节状态列）。
+- 未完成项：M3 起的网络/CLI 功能（见第 2 节状态列）。
+
+### 4.5 M2 存储层（m2 分支）
+
+完成项：
+
+- `frstorage`（C++20，`src/storage/` + `include/forgerelay/storage/`）：SQLite 元数据
+  （WAL、user_version 单事务迁移、绑定参数、短事务，DB-01..05，V1 含 §6 全部 8 张表）、
+  SHA-256 流式摘要双后端（Linux OpenSSL / Windows BCrypt，D-13）、内容寻址块存储
+  （临时写入+fsync+原子落位+去重+块头校验，FR-STO-01..04，D-15）、上传会话状态机
+  （FR-UP-01..09，含块大小 1–8 MiB 可配、单用户会话上限、过期处理）、原子发布
+  （FR-STO-05）、范围读（FR-DL-01..04，D-17）、删除与 GC（FR-GC-01..05，D-18）、
+  启动恢复（FR-STO-06：临时文件清理/过期会话/COMMITTING 回滚）。
+- 时钟与存储根可注入（ARCH-04）；新增稳定错误码 FR_E_CONFLICT/-16 FR_E_EXPIRED。
+- 测试：digest/db/chunk_store/会话/制品/维护 6 套 GTest + M2 集成场景
+  （TEST-02 #1 小文件、#2 1GiB 流式、#3 中断恢复、#4 块复用、#5 摘要错、#7 删除+dry-run/实际 GC），
+  合计 154 例（M1 106 + M2 48），数据全部运行时生成（TEST-03）。
+
+构建与测试结果（全部 -Werror 零警告）：
+
+| 配置 | 编译器 | 结果 |
+|---|---|---|
+| clang-debug / clang-ubsan / clang-asan / clang-release | Clang 22.1.8 | 154/154 |
+| gcc-debug / release（本地实测） | GNU GCC 16.2.0 | 154/154 |
+
+生产代码量（scc，include+src，不含空行注释）：3,632 行（C 1,468 + C 头 308 + C++ 1,523 + C++ 头 270 + CMake 51）。
+
+M2 退出条件核对：本地上传提交、下载和恢复测试通过 ✔。
+
+环境说明：SHA-256 的 OpenSSL 后端（`fr_digest_ossl.cpp`）与 `fr_fd.c` 的 POSIX 主分支
+运行级验证需在 Linux 目标环境复核（同 D-08/D-13，M3 前置任务）。

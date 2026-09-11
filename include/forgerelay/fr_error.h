@@ -37,7 +37,9 @@ typedef enum fr_status {
     FR_E_EXISTS = -11,   /**< 对象已存在。 */
     FR_E_LIMIT = -12,    /**< 超出配额或上限。 */
     FR_E_BUSY = -13,     /**< 资源忙碌（背压，M3+）。 */
-    FR_E_INTERNAL = -14  /**< 内部不变量被破坏。 */
+    FR_E_INTERNAL = -14, /**< 内部不变量被破坏。 */
+    FR_E_CONFLICT = -15, /**< 内容冲突（如同编号块内容不同）。 */
+    FR_E_EXPIRED = -16   /**< 对象已过期（如上传会话）。 */
 } fr_status;
 
 /** 错误类别（ERR-02），用于客户端区分可重试与永久错误（ERR-04）。 */

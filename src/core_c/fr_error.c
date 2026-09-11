@@ -38,6 +38,10 @@ const char *fr_status_name(fr_status code) {
         return "FR_E_BUSY";
     case FR_E_INTERNAL:
         return "FR_E_INTERNAL";
+    case FR_E_CONFLICT:
+        return "FR_E_CONFLICT";
+    case FR_E_EXPIRED:
+        return "FR_E_EXPIRED";
     default:
         return "FR_E_UNKNOWN";
     }
@@ -73,6 +77,10 @@ const char *fr_status_message(fr_status code) {
         return "limit exceeded";
     case FR_E_BUSY:
         return "busy";
+    case FR_E_CONFLICT:
+        return "content conflict";
+    case FR_E_EXPIRED:
+        return "object expired";
     case FR_E_INTERNAL:
         return "internal error";
     default:
@@ -100,6 +108,8 @@ fr_category fr_status_category(fr_status code) {
     case FR_E_STATE:
     case FR_E_NOTFOUND:
     case FR_E_EXISTS:
+    case FR_E_CONFLICT:
+    case FR_E_EXPIRED:
     case FR_E_BUSY:
         return FR_CAT_STATE;
     case FR_E_OVERFLOW:

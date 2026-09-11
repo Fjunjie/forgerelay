@@ -32,7 +32,7 @@ TEST(ErrorStatus, NamesAreStable) {
 }
 
 TEST(ErrorStatus, MessagesAreNonEmpty) {
-    for (int code = -14; code <= 0; code++) {
+    for (int code = -16; code <= 0; code++) {
         const char *msg = fr_status_message(static_cast<fr_status>(code));
         ASSERT_NE(nullptr, msg);
         EXPECT_GT(std::strlen(msg), 0u) << "code=" << code;
@@ -52,6 +52,8 @@ TEST(ErrorStatus, CategoryMapping) {
     EXPECT_EQ(FR_CAT_STATE, fr_status_category(FR_E_STATE));
     EXPECT_EQ(FR_CAT_STATE, fr_status_category(FR_E_NOTFOUND));
     EXPECT_EQ(FR_CAT_STATE, fr_status_category(FR_E_EXISTS));
+    EXPECT_EQ(FR_CAT_STATE, fr_status_category(FR_E_CONFLICT));
+    EXPECT_EQ(FR_CAT_STATE, fr_status_category(FR_E_EXPIRED));
     EXPECT_EQ(FR_CAT_INTERNAL, fr_status_category(FR_E_INTERNAL));
     EXPECT_EQ(FR_CAT_INTERNAL, fr_status_category(FR_E_OVERFLOW));
     // 未知错误码归入内部错误类别。

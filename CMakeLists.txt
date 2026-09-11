@@ -30,6 +30,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/core_c/CMakeLists.txt")
     add_subdirectory(src/core_c)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/storage/CMakeLists.txt")
+    add_subdirectory(src/storage)
+endif()
+
 if(FR_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     include(GetGoogleTest)
     fr_get_gtest()

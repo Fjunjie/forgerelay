@@ -112,6 +112,12 @@ public:
     HandleResult handle_get_continue(uint64_t conn_id, const std::string &peer,
                                      const std::string &state_key);
 
+    /**
+     * 连接关闭时清理该连接的全部 GET 续传状态（审计 #3，CWE-404）。
+     * 由传输层在关闭连接时调用；清除键前缀 "get-<conn_id>-" 的所有条目。
+     */
+    void on_connection_closed(uint64_t conn_id);
+
     /** 连接建立时调用：IP 限流检查；被封禁返回 false（传输层直接断开）。 */
     bool allow_peer(const std::string &peer);
 

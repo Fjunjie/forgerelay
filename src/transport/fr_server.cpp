@@ -205,12 +205,16 @@ struct Wakeup {
         writer = ::socket(AF_INET, SOCK_STREAM, 0);
         reader = kInvalidSocket;
         if (::connect(writer, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
+            close_socket(writer); // 错误路径释放 writer（审计 #6，CWE-404）
+            writer = kInvalidSocket;
             close_socket(listener);
             throw_error(FR_E_IO, "wakeup: connect failed");
         }
         reader = ::accept(listener, nullptr, nullptr);
         close_socket(listener);
         if (reader == kInvalidSocket) {
+            close_socket(writer); // accept 失败同样释放 writer
+            writer = kInvalidSocket;
             throw_error(FR_E_IO, "wakeup: accept failed");
         }
         set_nonblocking(reader);
@@ -498,6 +502,10 @@ struct Server::Impl {
         fr_frame_parser_destroy(&it->second.parser);
         fr_buf_destroy(&it->second.outbox);
         connections.erase(it);
+        /* 清理该连接的 GET 续传状态（审计 #3，CWE-404）。
+         * 锁顺序：此处持 conns_mu 再取 dispatcher 内部锁，与工作线程
+         * （先短暂取 conns_mu 释放、再在 handle 中取自身锁）无相反顺序 ✓。 */
+        dispatcher->on_connection_closed(conn_id);
     }
 
     void worker_loop(int worker_index)

@@ -270,6 +270,11 @@ void encode_query_upload_ok(fr_buf &out, const QueryUploadOk &ok)
 {
     put_u8(out, static_cast<uint8_t>(ok.state));
     put_u64(out, ok.chunk_count);
+    /* 编码端对称防御（审计 #5，CWE-197）：位图长度必须可由 u32 表达，
+     * 且不超过解码端 1 MiB 上限，防止截断导致协议错位。 */
+    if (ok.present_bitmap.size() > static_cast<size_t>(1024 * 1024)) {
+        throw_error(FR_E_RANGE, "present bitmap exceeds 1 MiB protocol limit");
+    }
     fr_buf_append_u32be(&out, static_cast<uint32_t>(ok.present_bitmap.size()));
     fr_buf_append(&out, ok.present_bitmap.data(), ok.present_bitmap.size());
 }

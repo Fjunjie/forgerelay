@@ -88,7 +88,9 @@ struct Dispatcher::Impl {
 
     void note_auth_failure(const std::string &peer)
     {
-        const int64_t now = now_seconds();
+        /* 安全相关的封禁计时使用单调时钟（审计 #4，CWE-203）：
+         * system_clock 受 NTP/手动调整影响会导致封禁意外延长或失效。 */
+        const int64_t now = now_seconds_monotonic();
         IpStat &stat = ip_stats[ip_of(peer)];
         if (stat.window_start == 0 || now - stat.window_start > kIpFailureWindowSeconds) {
             stat.window_start = now;
@@ -105,7 +107,7 @@ struct Dispatcher::Impl {
     void check_peer_not_blocked(const std::string &peer)
     {
         auto it = ip_stats.find(ip_of(peer));
-        if (it != ip_stats.end() && it->second.blocked_until > now_seconds()) {
+        if (it != ip_stats.end() && it->second.blocked_until > now_seconds_monotonic()) {
             throw_error(FR_E_UNAUTHENTICATED, "too many auth failures from your address");
         }
     }
@@ -161,6 +163,22 @@ Dispatcher::Dispatcher(Storage &storage, AuthRegistry &auth, const ServerSetting
 }
 
 Dispatcher::~Dispatcher() = default;
+
+void Dispatcher::on_connection_closed(uint64_t conn_id)
+{
+    Impl &impl = *impl_;
+    std::lock_guard<std::mutex> lock(impl.mu);
+    /* 键格式 "get-<conn_id>-<seq>"：按前缀清除该连接的全部续传状态
+     *（审计 #3，CWE-404——否则客户端断开后条目永久残留）。 */
+    const std::string prefix = "get-" + std::to_string(conn_id) + "-";
+    for (auto it = impl.gets.begin(); it != impl.gets.end();) {
+        if (it->first.rfind(prefix, 0) == 0) {
+            it = impl.gets.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
 
 bool Dispatcher::allow_peer(const std::string &peer)
 {
@@ -375,6 +393,11 @@ void Dispatcher::dispatch_business(uint64_t conn_id, ClientSession &session, con
         const SessionInfo info = impl.storage.get_session(session_id);
         impl.require_session_allowed(session, info);
         const Storage::SessionProgress progress = impl.storage.session_progress(session_id);
+        /* 防御（审计 #5 的根因）：恶意声明的 expected_size 会让位图膨胀至
+         * GB 级——超过解码端 1 MiB 协议上限的会话直接拒绝查询。 */
+        if ((progress.chunk_count + 7) / 8 > 1024ull * 1024) {
+            throw_error(FR_E_RANGE, "session chunk count exceeds QUERY bitmap limit");
+        }
         msg::QueryUploadOk ok;
         ok.state = info.state;
         ok.chunk_count = progress.chunk_count;

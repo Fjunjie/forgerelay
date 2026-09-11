@@ -119,9 +119,15 @@ void Logger::open(const std::filesystem::path &path, LogLevel level)
 
 void Logger::open(const std::filesystem::path &path, LogLevel level, const RotatePolicy &policy)
 {
-    close();
+    /* 与 log()/close() 互斥（审计 #2，CWE-362）：头文件承诺全部方法线程安全。
+     * 注意 open() 可能抛出（文件打开失败），锁由 guard 析构释放。 */
+    std::lock_guard<std::mutex> guard(*static_cast<std::mutex *>(mutex_));
     level_ = level;
     policy_ = policy;
+    if (file_ != nullptr) {
+        (void)fclose(static_cast<FILE *>(file_));
+        file_ = nullptr;
+    }
     if (path.empty()) {
         path_.clear();
         current_bytes_ = 0;
@@ -145,6 +151,10 @@ void Logger::open(const std::filesystem::path &path, LogLevel level, const Rotat
 
 void Logger::close() noexcept
 {
+    if (mutex_ == nullptr) {
+        return; // 构造失败防护（正常构造后 mutex_ 恒非空）
+    }
+    std::lock_guard<std::mutex> guard(*static_cast<std::mutex *>(mutex_));
     if (file_ != nullptr) {
         (void)fclose(static_cast<FILE *>(file_));
         file_ = nullptr;

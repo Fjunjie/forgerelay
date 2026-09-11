@@ -248,3 +248,29 @@ FetchContent）、单头库集成开销最小。头文件以 SYSTEM 引入，警
 
 **影响**：实测教训——续传任务的 has_more 曾被忽略、continuation_key 曾未传递，均被
 E2E 测试捕获（连接 5s 超时）；测试对这类链式协议 bug 的价值得到验证。
+
+## D-25 审计裁定：GET 续传 state_key 不引入随机化（code-hawk-uat #1 高危裁定为误报）
+
+**背景**：PR #2 审计（code-hawk-uat）将 `get-<conn_id>-<seq>` 续传状态键的可预测性
+评为高危会话劫持（CWE-330），建议改为加密随机或 HMAC 签名。
+
+**裁定**：**不采纳**。该键仅存在于服务器进程内部的 `Dispatcher::Impl::gets` 映射中，
+用于工作线程任务队列的续传寻址——**不在协议面传输，客户端与攻击者均不可见、不可控**
+（GET 响应是 DATA/OK 帧，无需客户端回传任何键）。`handle_get_continue` 亦非网络可达
+接口。可预测性对纯内部寻址键无安全影响；引入随机/HMAC 反而增加无收益的复杂度
+（与 D-09「内部标识取唯一性而非机密性」同一原则）。
+
+**同时确认的真实问题并已修复**：该审计关联指出的连接断开后 `gets` 条目残留
+（内存泄漏/状态累积，原 #3 中危）成立——已在 `Dispatcher::on_connection_closed()`
+中修复，传输层关闭连接时清除该连接的全部续传状态。
+
+## D-26 审计修复记录（code-hawk-uat，PR #2，共 6 项：1 高危 5 中危）
+
+| # | 级别 | 位置 | 问题 | 裁定 | 处理 |
+|---|---|---|---|---|---|
+| 1 | 🔴 | fr_dispatch GET case | state_key 可预测 | 误报（D-25：键非协议面） | 记录裁定 |
+| 2 | 🟡 | log.hpp open() | open/close 未加锁违反线程安全承诺 | 合理 | open/close 加互斥锁；close 拆出无锁内部路径 |
+| 3 | 🟡 | fr_dispatch gets | 连接断开后续传状态残留 | 合理（真实泄漏/DoS 向量） | on_connection_closed + 传输层关闭时调用 |
+| 4 | 🟡 | fr_dispatch 限流 | 封禁计时用 system_clock | 合理（CWE-203） | 改用 steady_clock 单调秒 |
+| 5 | 🟡 | fr_messages 位图 | 编码端缺 u32 溢出检查 | 合理且加重：恶意 expected_size 可使位图膨胀至 GB 级 | 编码端 1 MiB 上限 + QUERY 处理器拒绝超限会话 |
+| 6 | 🟡 | fr_server Wakeup | connect/accept 失败路径泄漏 writer | 合理（CWE-404） | 错误分支补 close_socket(writer) |

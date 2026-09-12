@@ -378,3 +378,19 @@ M3/M4 退出条件核对：协议测试（M1 帧层 + M3 E2E）与基本端到�
 
 环境说明：epoll/TLS/OpenSSL 后端与 POSIX fd 主分支的运行级验证需在 Linux 目标环境
 复核（D-08/D-13/D-19/D-20，M5 前置任务）。
+
+### 4.8 冒烟测试发现并修复的真实二进制缺陷（AC-02 实证）
+
+进程内 E2E 全部通过后，对真实二进制（forgerelayd + frctl）做了完整冒烟
+（status/upload/list/download/delete/gc/优雅停止），暴露并修复：
+
+1. **TOML 部分字段缺失时段错误**：toml++ `get(key)` 对缺失键返回 nullptr，
+   原实现 `get("key")->value_or(...)` 直接解引用——[tls] 仅含 enabled 时
+   certificate 缺失即崩溃。统一改为 node_view::value_or（缺失键取默认值）。
+2. **frctl 上传缓冲区溢出**：读入固定 1 MiB 缓冲，但按服务端 chunk_size
+   （4 MiB）读取——3 MiB 文件即堆溢出。改为按会话 chunk_size 调整缓冲。
+3. **parse_listen_address 拒绝端口 0**：重写时回归引入，破坏测试的
+   自动端口分配。已移除（端口 0 = OS 分配为合法语义）。
+
+另修复：close_connection_locked 现同步刷新 StatusHub 连接数（原仅在
+accept 时更新，空闲扫描/错误关闭后计数失真）。

@@ -926,7 +926,6 @@ struct Server::Impl {
         {
             std::lock_guard<std::mutex> lock(conns_mu);
             for (const auto &pair : connections) {
-                std::fprintf(stderr, "[dbg] sweep conn=%llu fd=%d peer=%s idle=%lld\n", (unsigned long long)pair.first, (int)pair.second.fd, pair.second.peer.c_str(), (long long)(now - pair.second.last_active));
                 if (now - pair.second.last_active > settings->request_timeout_seconds) {
                     expired.push_back(pair.first);
                 }

@@ -119,6 +119,8 @@ void cmd_upload(const std::string &file, const std::string &ns, const std::strin
     client.connect();
     const fr::msg::CreateUploadOk session =
         client.create_upload(ns, name, version, size, digest);
+    /* 按服务端会话的块大小读取（否则读入固定 1 MiB 缓冲会溢出——冒烟测试发现）。 */
+    buffer.resize(session.chunk_size);
 
     ProgressPrinter progress(size, !g.json);
     uint64_t ordinal = 0;

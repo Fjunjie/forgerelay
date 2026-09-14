@@ -24,6 +24,8 @@ struct Globals {
     bool json = false;
     bool verbose = false;
     bool confirm = false;
+    bool use_tls = false;    // --tls/--no-tls 显式指定
+    bool tls_explicit = false; // 用户是否显式指定 TLS 开关
 } g;
 
 struct CommandError {
@@ -49,6 +51,13 @@ fr::ClientOptions client_options()
         }
     }
     options.token = g.token;
+#if defined(FR_HAVE_OPENSSL)
+    /* §5.1：远程默认 TLS（D-20）。--no-tls 显式关闭（回环调试场景）。 */
+    options.use_tls = true; // §5.1 远程默认 TLS；--no-tls 显式关闭（D-20）
+#endif
+    if (g.tls_explicit) {
+        options.use_tls = g.use_tls;
+    }
     return options;
 }
 
@@ -110,6 +119,8 @@ void cmd_upload(const std::string &file, const std::string &ns, const std::strin
     client.connect();
     const fr::msg::CreateUploadOk session =
         client.create_upload(ns, name, version, size, digest);
+    /* 按服务端会话的块大小读取（否则读入固定 1 MiB 缓冲会溢出——冒烟测试发现）。 */
+    buffer.resize(session.chunk_size);
 
     ProgressPrinter progress(size, !g.json);
     uint64_t ordinal = 0;
@@ -459,6 +470,12 @@ int main(int argc, char **argv)
             } else if (arg == "--verbose") {
                 g.verbose = true;
                 g.json = false;
+            } else if (arg == "--tls") {
+                g.use_tls = true;
+                g.tls_explicit = true;
+            } else if (arg == "--no-tls") {
+                g.use_tls = false;
+                g.tls_explicit = true;
             } else if (arg == "--confirm") {
                 g.confirm = true;
             } else if (arg == "--help" || arg == "-h") {

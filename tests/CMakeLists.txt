@@ -15,6 +15,9 @@ set(FR_PROTOCOL_TEST_SOURCES
 )
 set(FR_E2E_TEST_SOURCES
     e2e/test_m3m4_e2e.cc
+    e2e/test_m5_concurrency.cc
+    e2e/test_m5_errors.cc
+    e2e/test_m5_limits.cc
 )
 set(FR_STORAGE_TEST_SOURCES
     storage/test_digest.cc

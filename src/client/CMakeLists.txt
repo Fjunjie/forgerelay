@@ -14,6 +14,13 @@ target_link_libraries(frclient PUBLIC frservice)
 
 if(WIN32)
     target_link_libraries(frclient PUBLIC ws2_32)
+else()
+    # TLS 后端（D-20）：与 frtransport 保持一致的门控。
+    find_package(OpenSSL QUIET)
+    if(OpenSSL_FOUND)
+        target_compile_definitions(frclient PUBLIC FR_HAVE_OPENSSL)
+        target_link_libraries(frclient PUBLIC OpenSSL::SSL)
+    endif()
 endif()
 
 fr_apply_warnings(frclient cxx)

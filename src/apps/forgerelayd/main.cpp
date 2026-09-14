@@ -122,9 +122,9 @@ int main(int argc, char **argv)
 
         fr::ServerSettings settings = fr::load_server_config(config_path); // CFG-01
         fr::apply_cli_overrides(settings, listen_override, log_level_override); // CFG-02
-#if defined(_WIN32)
+#if !defined(FR_HAVE_OPENSSL)
         if (settings.tls.enabled) {
-            std::cerr << "error: TLS is not available in the Windows dev build; "
+            std::cerr << "error: TLS backend unavailable in this build (no OpenSSL); "
                          "use a loopback listener with tls.enabled = false\n";
             return 1;
         }

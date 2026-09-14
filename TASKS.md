@@ -378,3 +378,73 @@ M3/M4 退出条件核对：协议测试（M1 帧层 + M3 E2E）与基本端到�
 
 环境说明：epoll/TLS/OpenSSL 后端与 POSIX fd 主分支的运行级验证需在 Linux 目标环境
 复核（D-08/D-13/D-19/D-20，M5 前置任务）。
+
+### 4.7 M5 完善交付 + M6 最终验收（m5-m6 分支）
+
+完成项：
+
+- **TLS 1.3 后端**（D-20，`FR_HAVE_OPENSSL` 门控）：`fr::tls` ServerCtx/ClientCtx/Session，
+  服务端非阻塞握手状态机接入 I/O 循环；客户端阻塞握手 + 证书/主机名校验（SEC-02）；
+  收发统一路由；`frctl --tls/--no-tls`；无后端构建下 `tls.enabled=true` 拒绝启动。
+- **三组 e2e 测试**：并发（§13：并发上传/下载一致性/硬断开清理/幂等）、错误场景
+  （协议破坏→断开且服务存活、不存在资源、非法标识、无效令牌、坏块参数）、
+  资源限制（§7.3：max_connections 占满拒绝新连接、空闲扫描超时断开）。
+- **部署交付物**（§16）：`deploy/forgerelayd.service`（systemd 沙箱示例）、
+  `docs/OPERATIONS.md`、`docs/SECURITY.md`、`LICENSE`（MIT）。
+- 附录 B 最终交付检查清单 10 项逐项核对通过。
+- 真实二进制冒烟全链路（AC-02）通过并修复 3 个缺陷（见 4.8）。
+
+构建与测试结果（全部 -Werror 零警告）：6 配置 172/172
+（clang-debug/asan/ubsan/release = Clang 22.1.8；gcc-debug/release = GNU GCC 16.2.0）。
+
+生产代码量：约 8.6k 行（scc 口径上轮 8,672；上限 20,000）。
+
+遗留项（如实记录）：
+
+1. `fr-check` 离线一致性检查工具（§3.1 组件）未实现，ARCHITECTURE.md 标注 M5+ 顺延；
+   README.md 已列名——需实现或在 DECISIONS.md 记录裁定。
+2. ERR-05 指数退避自动重试（§11）未实现（错误分类基础 ERR-04 已有）。
+3. Linux 运行级复核：epoll 分支/OpenSSL 后端/POSIX fd 主分支在本机从未参与编译
+   （Windows 构建 `_WIN32` 分支），必须在 Linux 目标环境复跑
+   `cmake --preset gcc-debug` / `clang-asan`。
+
+### 4.8 冒烟测试发现并修复的真实二进制缺陷（AC-02 实证）
+
+进程内 E2E 全部通过后，对真实二进制（forgerelayd + frctl）做了完整冒烟
+（status/upload/list/download/delete/gc/优雅停止），暴露并修复：
+
+1. **TOML 部分字段缺失时段错误**：toml++ `get(key)` 对缺失键返回 nullptr，
+   原实现 `get("key")->value_or(...)` 直接解引用——[tls] 仅含 enabled 时
+   certificate 缺失即崩溃。统一改为 node_view::value_or（缺失键取默认值）。
+2. **frctl 上传缓冲区溢出**：读入固定 1 MiB 缓冲，但按服务端 chunk_size
+   （4 MiB）读取——3 MiB 文件即堆溢出。改为按会话 chunk_size 调整缓冲。
+3. **parse_listen_address 拒绝端口 0**：重写时回归引入，破坏测试的
+   自动端口分配。已移除（端口 0 = OS 分配为合法语义）。
+
+另修复：close_connection_locked 现同步刷新 StatusHub 连接数（原仅在
+accept 时更新，空闲扫描/错误关闭后计数失真）。
+
+### 4.9 PR #3 审计修复记录（code-hawk-uat，9 项全部采纳）
+
+| # | 严重度 | 问题 | 修复 |
+|---|---|---|---|
+| 1 | 高 | `SSL_set_tlsext_host_name`/`SSL_set1_host` 返回值未检查，主机名校验可被静默跳过（SEC-02） | 任一失败即 `SSL_free` 并抛 `FR_E_IO` |
+| 2 | 中 | `drive_handshake` 返回 -1 时调用方仅重订阅不关闭 → 僵尸连接占用槽位 | -1 时 `close_connection_locked` + warn 日志 |
+| 3/5/6 | 中/高 | `Session::read` 语义与 tls.hpp 契约相反：WANT_*→-1（分片 TLS 记录误杀健康连接）、close_notify→0（EOF 永久可读致电平轮询空转 DoS） | 映射对调：WANT_*→0、ZERO_RETURN/其余→-1，与明文 `read_some` 及调用方 `n<0`/`n==0` 消费方式对齐 |
+| 4 | 中 | 错误场景测试注释声称验证 FR-UP-08 回滚但无对应步骤 | 补 `EXPECT_NO_THROW(put_chunk)`（COMMITTING 卡死时 put 被拒，成功即回滚证据） |
+| 7 | 中 | `send_raw_frame`/`send_garbage` 绕过统一发送路由，TLS 会话存在时明文直写 fd | 改走 `Impl::send_bytes` |
+| 8 | 中 | 并发下载 lambda `[&]` 悬垂捕获循环变量 `t`（UB） | 改 `[&, t]`（与同文件另一测试一致） |
+| 9 | 中 | "异常断开"测试实际走 `~Client` 补发 CLOSE 的优雅关闭路径，未覆盖中断场景 | 重写为原生 socket：连接→手工编码合法 HELLO→不发 CLOSE 硬关闭 |
+
+审计之外的额外发现（stub 头语法检查，`clang++ -fsyntax-only -DFR_HAVE_OPENSSL`）：
+
+- **fr_server.cpp 缺失 `#include "forgerelay/tls.hpp"`**——无 OpenSSL 构建下
+  tls.hpp 为空故不报错，但 Linux `FR_HAVE_OPENSSL` 构建必编译失败。
+  属"该分支从未参与编译"缺陷的实证，已补（tls.hpp 自门控，无条件包含安全）。
+- **.clang-format（M0 起）与代码实际风格不符**（函数大括号换行、续行不对齐等），
+  导致"格式检查"此前从未真正生效。已将配置修正为描述现有代码风格
+  （Custom/AfterFunction、AlwaysBreak、ContinuationIndentWidth 4 等）；
+  本轮修改的文件全量重排，**其余文件的全库格式化列为遗留项**。
+
+验证：stub 语法检查通过（fr_tls/fr_server/fr_client 的 TLS 分支首次获得编译级检查）；
+6 配置 172/172（-Werror 零警告）；clang-format 对修改文件通过。

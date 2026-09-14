@@ -1,0 +1,29 @@
+# ForgeRelay 服务端 systemd 单元示例（需求 §16 安装示例）。
+# 安装：sudo cp deploy/forgerelayd.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now forgerelayd
+[Unit]
+Description=ForgeRelay artifact cache and distribution service
+Documentation=https://internal.example.com/forgerelay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=forgerelay
+Group=forgerelay
+ExecStart=/usr/local/bin/forgerelayd --config /etc/forgerelay/server.toml
+# LIFE-05：SIGTERM 触发优雅停止（停止接受新连接，等待在途任务，超时后强杀）。
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# SEC-03/04：专用低权限用户、最小文件权限、保护性目录（非特权运行，不用 root）。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/forgerelay /var/log/forgerelay
+
+[Install]
+WantedBy=multi-user.target

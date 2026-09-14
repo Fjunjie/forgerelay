@@ -3,6 +3,7 @@ BasedOnStyle: LLVM
 Language: Cpp
 Standard: c++20
 IndentWidth: 4
+ContinuationIndentWidth: 4
 ColumnLimit: 100
 PointerAlignment: Right
 DerivePointerAlignment: false
@@ -11,8 +12,12 @@ AllowShortFunctionsOnASingleLine: Inline
 AllowShortIfStatementsOnASingleLine: Never
 AllowShortLoopsOnASingleLine: false
 AlwaysBreakTemplateDeclarations: Yes
-BreakBeforeBraces: Attach
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
 IncludeBlocks: Preserve
 SortIncludes: CaseSensitive
 SpaceAfterCStyleCast: false
 AlignConsecutiveMacros: Consecutive
+AlignAfterOpenBracket: AlwaysBreak
+AlignOperands: DontAlign

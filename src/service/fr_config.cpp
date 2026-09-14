@@ -1,4 +1,6 @@
 // fr_config.cpp - 服务端配置解析与校验实现（CFG-01/CFG-02）。
+// TOML 访问统一使用 node_view::value_or（缺失键取默认值）——toml++ 的
+// get(key) 对缺失键返回 nullptr，直接 ->value_or 会崩溃（冒烟测试发现，AC-02）。
 #include "forgerelay/config.hpp"
 
 #include <toml++/toml.hpp>
@@ -110,58 +112,61 @@ ServerSettings load_server_config(const std::string &path)
 
     ServerSettings settings;
 
-    if (auto server = table["server"].as_table()) {
-        settings.listen = server->get("listen")->value_or(settings.listen);
-        settings.max_connections = static_cast<int>(server->get("max_connections")->value_or(
-            static_cast<int64_t>(settings.max_connections)));
-        settings.worker_threads = static_cast<int>(
-            server->get("worker_threads")->value_or(static_cast<int64_t>(settings.worker_threads)));
-    }
-    if (auto tls = table["tls"].as_table()) {
-        settings.tls.enabled = tls->get("enabled")->value_or(false);
-        settings.tls.certificate = tls->get("certificate")->value_or(std::string());
-        settings.tls.private_key = tls->get("private_key")->value_or(std::string());
-    }
-    if (auto storage = table["storage"].as_table()) {
-        settings.storage.root = storage->get("root")->value_or(std::string());
-        const int64_t capacity =
-            storage->get("capacity_bytes")->value_or(static_cast<int64_t>(
-                settings.storage.capacity_bytes > INT64_MAX
-                    ? INT64_MAX
-                    : static_cast<int64_t>(settings.storage.capacity_bytes)));
+    /* 统一 node_view::value_or 访问：缺失节/缺失键均取默认值（冒烟测试发现
+     * get(key)->value_or 在部分字段缺失时解引用空指针，AC-02）。 */
+
+    settings.listen = table["server"]["listen"].value_or(settings.listen);
+    settings.max_connections = static_cast<int>(
+        table["server"]["max_connections"].value_or<int64_t>(settings.max_connections));
+    settings.worker_threads = static_cast<int>(
+        table["server"]["worker_threads"].value_or<int64_t>(settings.worker_threads));
+
+    settings.tls.enabled = table["tls"]["enabled"].value_or(settings.tls.enabled);
+    settings.tls.certificate =
+        table["tls"]["certificate"].value_or<std::string>(std::move(settings.tls.certificate));
+    settings.tls.private_key =
+        table["tls"]["private_key"].value_or<std::string>(std::move(settings.tls.private_key));
+
+    settings.storage.root =
+        table["storage"]["root"].value_or<std::string>(settings.storage.root.string());
+    {
+        const int64_t capacity = table["storage"]["capacity_bytes"].value_or<int64_t>(
+            settings.storage.capacity_bytes > INT64_MAX
+                ? INT64_MAX
+                : static_cast<int64_t>(settings.storage.capacity_bytes));
         settings.storage.capacity_bytes = static_cast<uint64_t>(capacity);
-        settings.storage.high_watermark_percent = static_cast<int>(storage->get(
-                                                                        "high_watermark_percent")
-                                                                        ->value_or(static_cast<int64_t>(
-                                                                            settings.storage.high_watermark_percent)));
-        settings.storage.session_hours =
-            static_cast<int>(storage->get("upload_session_hours")->value_or(static_cast<int64_t>(
-                settings.storage.session_hours)));
-        settings.storage.chunk_size =
-            static_cast<uint64_t>(storage->get("chunk_size")->value_or(
-                static_cast<int64_t>(settings.storage.chunk_size)));
-        settings.storage.gc_grace_seconds =
-            static_cast<int>(storage->get("gc_grace_seconds")->value_or(static_cast<int64_t>(
-                settings.storage.gc_grace_seconds)));
-        settings.storage.max_sessions_per_owner =
-            static_cast<int>(storage->get("max_sessions_per_owner")->value_or(static_cast<int64_t>(
-                settings.storage.max_sessions_per_owner)));
     }
-    if (auto database = table["database"].as_table()) {
-        settings.database_path = database->get("path")->value_or(std::string());
-    }
-    if (auto logging = table["logging"].as_table()) {
-        settings.log.level = logging->get("level")->value_or(settings.log.level);
-        settings.log.format = logging->get("format")->value_or(settings.log.format);
-        settings.log.file = logging->get("file")->value_or(std::string());
-        const int64_t max_bytes = logging->get("max_file_bytes")->value_or(
-            static_cast<int64_t>(settings.log.max_file_bytes > INT64_MAX
-                                     ? INT64_MAX
-                                     : static_cast<int64_t>(settings.log.max_file_bytes)));
+    settings.storage.high_watermark_percent = static_cast<int>(
+        table["storage"]["high_watermark_percent"].value_or<int64_t>(
+            settings.storage.high_watermark_percent));
+    settings.storage.session_hours = static_cast<int>(
+        table["storage"]["upload_session_hours"].value_or<int64_t>(
+            settings.storage.session_hours));
+    settings.storage.chunk_size = static_cast<uint64_t>(
+        table["storage"]["chunk_size"].value_or<int64_t>(
+            static_cast<int64_t>(settings.storage.chunk_size)));
+    settings.storage.gc_grace_seconds = static_cast<int>(
+        table["storage"]["gc_grace_seconds"].value_or<int64_t>(
+            settings.storage.gc_grace_seconds));
+    settings.storage.max_sessions_per_owner = static_cast<int>(
+        table["storage"]["max_sessions_per_owner"].value_or<int64_t>(
+            settings.storage.max_sessions_per_owner));
+
+    settings.database_path =
+        table["database"]["path"].value_or<std::string>(std::move(settings.database_path));
+
+    settings.log.level = table["logging"]["level"].value_or(settings.log.level);
+    settings.log.format = table["logging"]["format"].value_or(settings.log.format);
+    settings.log.file = table["logging"]["file"].value_or<std::string>(std::move(settings.log.file));
+    {
+        const int64_t max_bytes = table["logging"]["max_file_bytes"].value_or<int64_t>(
+            settings.log.max_file_bytes > INT64_MAX
+                ? INT64_MAX
+                : static_cast<int64_t>(settings.log.max_file_bytes));
         settings.log.max_file_bytes = static_cast<uint64_t>(max_bytes);
-        settings.log.keep_files = static_cast<int>(
-            logging->get("keep_files")->value_or(static_cast<int64_t>(settings.log.keep_files)));
     }
+    settings.log.keep_files = static_cast<int>(
+        table["logging"]["keep_files"].value_or<int64_t>(settings.log.keep_files));
 
     validate_server_settings(settings);
     return settings;

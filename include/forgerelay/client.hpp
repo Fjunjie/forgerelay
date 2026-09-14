@@ -29,7 +29,9 @@ struct ClientOptions {
     std::string host = "127.0.0.1";
     uint16_t port = 7443;
     int timeout_seconds = 30;
-    std::string token; // bearer token（FR-AUTH-02）
+    std::string token;        // bearer token（FR-AUTH-02）
+    bool use_tls = false;     // §5.1 远程默认 TLS；无 OpenSSL 构建置 false（D-20）
+    std::string tls_hostname; // 证书主机名校验；空则用 host（SEC-02）
 };
 
 /** 一条命令的连接会话；析构自动发送 CLOSE 并关闭。 */
@@ -77,6 +79,12 @@ public:
     std::vector<msg::TokenItem> token_list(const std::string &username);
     std::vector<msg::SessionItem> session_list();
     void session_abort(const std::string &session_id);
+
+    /** 测试/错误场景专用：发送原始帧（不等待响应、不做合法性包装）。 */
+    void send_raw_frame(uint8_t type, const void *payload, size_t len);
+
+    /** 测试/错误场景专用：发送任意原始字节（协议破坏场景）。 */
+    void send_garbage(const std::string &bytes);
 
 private:
     /** 发送请求并读取一帧响应；ERROR 帧转换为 fr::Error（保留稳定码）。 */

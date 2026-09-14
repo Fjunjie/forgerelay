@@ -1,5 +1,6 @@
 // fr_client.cpp - 阻塞式客户端实现。
 #include "forgerelay/client.hpp"
+#include "forgerelay/tls.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -60,8 +61,8 @@ void send_all(fr_socket_t fd, const uint8_t *data, size_t len)
     size_t off = 0;
     while (off < len) {
 #if defined(_WIN32)
-        const int n = ::send(fd, reinterpret_cast<const char *>(data + off),
-                             static_cast<int>(len - off), 0);
+        const int n =
+            ::send(fd, reinterpret_cast<const char *>(data + off), static_cast<int>(len - off), 0);
 #else
         const ssize_t n = ::send(fd, data + off, len - off, MSG_NOSIGNAL);
 #endif
@@ -106,15 +107,49 @@ struct Client::Impl {
     ClientOptions options;
     fr_socket_t fd = kInvalidSocket;
     fr_frame_parser parser;
-    fr_buf inbuf;   // 接收缓冲（保留跨帧遗留字节，PROTO-01）
+    fr_buf inbuf; // 接收缓冲（保留跨帧遗留字节，PROTO-01）
     size_t inpos = 0;
     bool connected = false;
+#if defined(FR_HAVE_OPENSSL)
+    std::unique_ptr<tls::ClientCtx> tls_ctx;
+    std::unique_ptr<tls::Session> tls; // use_tls 时存在（D-20）
+#endif
 
-    Impl() {
-        fr_buf_init(&inbuf);
+    Impl() { fr_buf_init(&inbuf); }
+    ~Impl() { fr_buf_destroy(&inbuf); }
+
+    /** 统一发送路由：TLS 会话存在时走 SSL。 */
+    void send_bytes(const uint8_t *data, size_t len)
+    {
+#if defined(FR_HAVE_OPENSSL)
+        if (tls) {
+            size_t off = 0;
+            while (off < len) {
+                const int n = tls->write(data + off, static_cast<int>(len - off));
+                if (n <= 0) {
+                    throw_error(FR_E_IO, "connection lost while sending (tls)");
+                }
+                off += static_cast<size_t>(n);
+            }
+            return;
+        }
+#endif
+        send_all(fd, data, len);
     }
-    ~Impl() {
-        fr_buf_destroy(&inbuf);
+
+    /** 统一接收路由：读取至少 1 字节。 */
+    size_t recv_bytes(uint8_t *buf, size_t len)
+    {
+#if defined(FR_HAVE_OPENSSL)
+        if (tls) {
+            const int n = tls->read(buf, static_cast<int>(len));
+            if (n <= 0) {
+                throw_error(FR_E_IO, "connection lost while receiving (tls)");
+            }
+            return static_cast<size_t>(n);
+        }
+#endif
+        return recv_some(fd, buf, len);
     }
 };
 
@@ -131,7 +166,7 @@ Client::~Client()
             fr_buf payload;
             fr_buf_init(&payload);
             fr_frame_encode(&payload, FR_MSG_CLOSE, 0, 1, nullptr, 0);
-            send_all(impl_->fd, payload.data, payload.len);
+            impl_->send_bytes(payload.data, payload.len);
             fr_buf_destroy(&payload);
         } catch (...) {
             // 析构尽力而为
@@ -152,8 +187,10 @@ void Client::connect()
     const std::string port = std::to_string(impl.options.port);
     const int gai_rc = getaddrinfo(impl.options.host.c_str(), port.c_str(), &hints, &result);
     if (gai_rc != 0 || result == nullptr) {
-        throw_error(FR_E_IO, "cannot resolve server address: " + impl.options.host +
-                                  " (gai=" + std::to_string(gai_rc) + ")");
+        throw_error(
+            FR_E_IO,
+            "cannot resolve server address: " + impl.options.host +
+                " (gai=" + std::to_string(gai_rc) + ")");
     }
     impl.fd = kInvalidSocket;
     for (addrinfo *it = result; it != nullptr; it = it->ai_next) {
@@ -172,6 +209,25 @@ void Client::connect()
         throw_error(FR_E_IO, "cannot connect to " + impl.options.host + ":" + port);
     }
     set_timeout(impl.fd, impl.options.timeout_seconds);
+
+    /* TLS 握手（SEC-02；D-20：无 OpenSSL 构建请求 TLS 时明确报错）。 */
+#if defined(FR_HAVE_OPENSSL)
+    if (impl.options.use_tls) {
+        impl.tls_ctx = std::make_unique<tls::ClientCtx>();
+        impl.tls_ctx->init();
+        impl.tls = std::make_unique<tls::Session>();
+        impl.tls->connect_client(
+            *impl.tls_ctx, impl.fd,
+            impl.options.tls_hostname.empty() ? impl.options.host : impl.options.tls_hostname);
+    }
+#else
+    if (impl.options.use_tls) {
+        throw_error(
+            FR_E_IO,
+            "TLS unavailable in this build (no OpenSSL); use a "
+            "loopback/plain connection or rebuild with OpenSSL");
+    }
+#endif
     impl.connected = true;
 
     /* HELLO 握手。 */
@@ -203,9 +259,9 @@ fr_frame Client::read_frame()
             size_t consumed = 0;
             fr_frame frame{};
             bool ready = false;
-            const fr_status fs = fr_frame_parser_feed(&impl.parser, impl.inbuf.data + impl.inpos,
-                                                        impl.inbuf.len - impl.inpos, &consumed,
-                                                        &frame, &ready);
+            const fr_status fs = fr_frame_parser_feed(
+                &impl.parser, impl.inbuf.data + impl.inpos, impl.inbuf.len - impl.inpos, &consumed,
+                &frame, &ready);
             if (fs != FR_OK) {
                 throw_error(FR_E_PROTOCOL, "server sent invalid frame");
             }
@@ -219,8 +275,35 @@ fr_frame Client::read_frame()
             }
         }
         uint8_t chunk[65536];
-        const size_t n = recv_some(impl.fd, chunk, sizeof(chunk));
+        const size_t n = impl.recv_bytes(chunk, sizeof(chunk));
         fr_buf_append(&impl.inbuf, chunk, n);
+    }
+}
+
+void Client::send_raw_frame(uint8_t type, const void *payload, size_t len)
+{
+    Impl &impl = *impl_;
+    fr_buf out;
+    fr_buf_init(&out);
+    const fr_status st = fr_frame_encode(
+        &out, type, 0,
+        static_cast<uint32_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffffu) |
+            1u,
+        payload, len);
+    if (st != FR_OK) {
+        fr_buf_destroy(&out);
+        throw_error(st, "encode raw frame failed");
+    }
+    impl.send_bytes(out.data, out.len); // 统一路由：TLS 会话存在时同样加密
+    fr_buf_destroy(&out);
+}
+
+void Client::send_garbage(const std::string &bytes)
+{
+    Impl &impl = *impl_;
+    if (!bytes.empty()) {
+        impl.send_bytes(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size());
     }
 }
 
@@ -229,14 +312,16 @@ fr_frame Client::request(uint8_t type, const fr_buf &payload)
     Impl &impl = *impl_;
     fr_buf out;
     fr_buf_init(&out);
-    const uint32_t req_id = static_cast<uint32_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffffu) | 1u;
+    const uint32_t req_id =
+        static_cast<uint32_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffffu) |
+        1u;
     const fr_status st = fr_frame_encode(&out, type, 0, req_id, payload.data, payload.len);
     if (st != FR_OK) {
         fr_buf_destroy(&out);
         throw_error(st, "encode request failed");
     }
-    send_all(impl.fd, out.data, out.len);
+    impl.send_bytes(out.data, out.len);
     fr_buf_destroy(&out);
 
     fr_frame frame = read_frame();
@@ -259,9 +344,9 @@ msg::StatusOk Client::status()
     return msg::decode_status_ok(frame);
 }
 
-std::vector<msg::ArtifactSummary> Client::list_artifacts(const std::optional<std::string> &ns,
-                                                         const std::optional<std::string> &name,
-                                                         uint32_t limit, uint32_t offset)
+std::vector<msg::ArtifactSummary> Client::list_artifacts(
+    const std::optional<std::string> &ns, const std::optional<std::string> &name, uint32_t limit,
+    uint32_t offset)
 {
     msg::ListArtifactsReq req;
     req.ns = ns;
@@ -276,8 +361,8 @@ std::vector<msg::ArtifactSummary> Client::list_artifacts(const std::optional<std
     return msg::decode_list_artifacts_ok(frame).items;
 }
 
-msg::ShowArtifactOk Client::show_artifact(const std::string &ns, const std::string &name,
-                                          const std::string &version)
+msg::ShowArtifactOk
+Client::show_artifact(const std::string &ns, const std::string &name, const std::string &version)
 {
     fr_buf payload;
     fr_buf_init(&payload);
@@ -288,9 +373,9 @@ msg::ShowArtifactOk Client::show_artifact(const std::string &ns, const std::stri
     return msg::decode_show_artifact_ok(frame);
 }
 
-uint64_t Client::download(const std::string &ns, const std::string &name,
-                          const std::string &version, uint64_t offset, uint64_t length,
-                          const Sink &sink)
+uint64_t Client::download(
+    const std::string &ns, const std::string &name, const std::string &version, uint64_t offset,
+    uint64_t length, const Sink &sink)
 {
     msg::GetArtifactReq req;
     req.ref = {ns, name, version};
@@ -321,9 +406,9 @@ uint64_t Client::download(const std::string &ns, const std::string &name,
     return total;
 }
 
-msg::CreateUploadOk Client::create_upload(const std::string &ns, const std::string &name,
-                                          const std::string &version, uint64_t expected_size,
-                                          const std::string &expected_digest)
+msg::CreateUploadOk Client::create_upload(
+    const std::string &ns, const std::string &name, const std::string &version,
+    uint64_t expected_size, const std::string &expected_digest)
 {
     msg::CreateUploadReq req;
     req.ref = {ns, name, version};
@@ -337,14 +422,13 @@ msg::CreateUploadOk Client::create_upload(const std::string &ns, const std::stri
     return msg::decode_create_upload_ok(frame);
 }
 
-msg::PutChunkOk Client::put_chunk(const std::string &session_id, uint64_t ordinal,
-                                  const void *data, size_t len)
+msg::PutChunkOk
+Client::put_chunk(const std::string &session_id, uint64_t ordinal, const void *data, size_t len)
 {
     msg::PutChunkReq req;
     req.session_id = session_id;
     req.ordinal = ordinal;
-    req.data.assign(static_cast<const uint8_t *>(data),
-                    static_cast<const uint8_t *>(data) + len);
+    req.data.assign(static_cast<const uint8_t *>(data), static_cast<const uint8_t *>(data) + len);
     fr_buf payload;
     fr_buf_init(&payload);
     msg::encode_put_chunk_req(payload, req);
@@ -382,8 +466,8 @@ void Client::abort_upload(const std::string &session_id)
     fr_buf_destroy(&payload);
 }
 
-int64_t Client::delete_artifact(const std::string &ns, const std::string &name,
-                                const std::string &version)
+int64_t
+Client::delete_artifact(const std::string &ns, const std::string &name, const std::string &version)
 {
     fr_buf payload;
     fr_buf_init(&payload);

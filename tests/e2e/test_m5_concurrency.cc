@@ -9,6 +9,15 @@
 
 #include <gtest/gtest.h>
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include "forgerelay/client.hpp"
 #include "forgerelay/log.hpp"
 #include "forgerelay/service.hpp"
@@ -21,7 +30,8 @@ namespace {
 
 class M5ConcurrencyTest : public ::testing::Test {
 protected:
-    void SetUp() override {
+    void SetUp() override
+    {
         root_ =
             std::filesystem::path(::testing::TempDir()) / ("fr_m5c_" + std::to_string(++counter_));
         std::filesystem::remove_all(root_);
@@ -46,7 +56,8 @@ protected:
         server_ = fr::Server::start(settings_, *storage_, *dispatcher_, log_, hub_.get());
     }
 
-    void TearDown() override {
+    void TearDown() override
+    {
         server_->stop();
         auth_.reset();
         storage_.reset();
@@ -54,7 +65,8 @@ protected:
         std::filesystem::remove_all(root_, ec);
     }
 
-    std::unique_ptr<fr::Client> make_client(const std::string &token) {
+    std::unique_ptr<fr::Client> make_client(const std::string &token)
+    {
         fr::ClientOptions options;
         options.host = "127.0.0.1";
         options.port = server_->port();
@@ -66,8 +78,8 @@ protected:
     }
 
     /** 单客户端完整上传一个制品；name 含线程标识。 */
-    void upload_artifact(fr::Client &client, const std::string &name, char fill,
-                         uint64_t extra = 0) {
+    void upload_artifact(fr::Client &client, const std::string &name, char fill, uint64_t extra = 0)
+    {
         const std::string block(1024 * 1024, fill);
         const std::string tail(extra, fill);
         fr::Sha256Stream overall;
@@ -104,7 +116,8 @@ protected:
 int M5ConcurrencyTest::counter_ = 0;
 
 /// 4 线程并发上传 8 个制品：全部成功且内容互不串扰（§13 并发）。
-TEST_F(M5ConcurrencyTest, ParallelUploadsDistinctArtifacts) {
+TEST_F(M5ConcurrencyTest, ParallelUploadsDistinctArtifacts)
+{
     constexpr int kThreads = 4;
     constexpr int kPerThread = 2;
     std::atomic<int> failures{0};
@@ -143,7 +156,8 @@ TEST_F(M5ConcurrencyTest, ParallelUploadsDistinctArtifacts) {
 }
 
 /// 多线程并发下载同一制品：内容一致、总量正确。
-TEST_F(M5ConcurrencyTest, ParallelDownloadsSameArtifact) {
+TEST_F(M5ConcurrencyTest, ParallelDownloadsSameArtifact)
+{
     auto publisher = make_client(publisher_token_);
     const std::string block(3 * 1024 * 1024, 'Z');
     {
@@ -153,8 +167,8 @@ TEST_F(M5ConcurrencyTest, ParallelDownloadsSameArtifact) {
         const fr::msg::CreateUploadOk session =
             publisher->create_upload("ci", "shared", "1.0", block.size(), digest);
         for (uint64_t ordinal = 0; ordinal < 3; ordinal++) {
-            (void)publisher->put_chunk(session.session_id, ordinal,
-                                       block.data() + ordinal * 1024 * 1024, 1024 * 1024);
+            (void)publisher->put_chunk(
+                session.session_id, ordinal, block.data() + ordinal * 1024 * 1024, 1024 * 1024);
         }
         (void)publisher->commit_upload(session.session_id);
     }
@@ -162,14 +176,14 @@ TEST_F(M5ConcurrencyTest, ParallelDownloadsSameArtifact) {
     std::atomic<int> failures{0};
     std::vector<std::thread> threads;
     for (int t = 0; t < 3; t++) {
-        threads.emplace_back([&] {
+        threads.emplace_back([&, t] {
             try {
                 auto reader = make_client(publisher_token_);
                 std::string got;
-                reader->download("ci", "shared", "1.0", 0, UINT64_MAX,
-                                 [&](const void *data, size_t len) {
-                                     got.append(static_cast<const char *>(data), len);
-                                 });
+                reader->download(
+                    "ci", "shared", "1.0", 0, UINT64_MAX, [&](const void *data, size_t len) {
+                        got.append(static_cast<const char *>(data), len);
+                    });
                 if (got != block) {
                     ADD_FAILURE() << "downloaded content mismatch (thread " << t << ")";
                     failures.fetch_add(1);
@@ -186,17 +200,64 @@ TEST_F(M5ConcurrencyTest, ParallelDownloadsSameArtifact) {
     EXPECT_EQ(0, failures.load());
 }
 
-/// 客户端异常断开（无 CLOSE 直接析构）：服务端清理续传状态并继续服务（审计 #3）。
-TEST_F(M5ConcurrencyTest, AbruptDisconnectCleanedAndServerSurvives) {
-    /* 建立连接、发 HELLO，然后硬断开（析构不发 CLOSE——连接中断场景）。 */
+/// 客户端异常断开（发完 HELLO 后直接关闭 fd，无 CLOSE 帧）：服务端清理并继续服务（审计 #3）。
+TEST_F(M5ConcurrencyTest, AbruptDisconnectCleanedAndServerSurvives)
+{
+    /* 客户端库的析构会尽力补发 CLOSE（退化为优雅关闭），无法覆盖"连接凭空消失"
+     * 的路径，故此处绕开 fr::Client 直接使用 socket：TCP 连接 → 发合法 HELLO 帧
+     * → 不发 CLOSE 硬关闭（对端以 EOF/错误感知断开）。 */
     {
-        fr::ClientOptions options;
-        options.host = "127.0.0.1";
-        options.port = server_->port();
-        options.timeout_seconds = 5;
-        fr::Client abrupt(options);
-        abrupt.connect();
-        // 作用域结束：析构路径走“连接已断”语义（直接关闭 fd）
+#if defined(_WIN32)
+        const SOCKET fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        ASSERT_NE(fd, INVALID_SOCKET);
+#else
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        ASSERT_GE(fd, 0);
+#endif
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(server_->port());
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#if defined(_WIN32)
+        ASSERT_EQ(
+            ::connect(
+                fd, reinterpret_cast<const sockaddr *>(&addr), static_cast<int>(sizeof(addr))),
+            0);
+#else
+        ASSERT_EQ(
+            ::connect(
+                fd, reinterpret_cast<const sockaddr *>(&addr),
+                static_cast<socklen_t>(sizeof(addr))),
+            0);
+#endif
+
+        fr_buf payload;
+        fr_buf_init(&payload);
+        fr_buf frame;
+        fr_buf_init(&frame);
+        fr::msg::HelloReq hello;
+        hello.client = "m5-abrupt-raw";
+        fr::msg::encode_hello_req(payload, hello);
+        ASSERT_EQ(fr_frame_encode(&frame, FR_MSG_HELLO, 0, 1, payload.data, payload.len), FR_OK);
+        size_t sent = 0;
+        while (sent < frame.len) {
+#if defined(_WIN32)
+            const int n = ::send(
+                fd, reinterpret_cast<const char *>(frame.data + sent),
+                static_cast<int>(frame.len - sent), 0);
+#else
+            const ssize_t n = ::send(fd, frame.data + sent, frame.len - sent, 0);
+#endif
+            ASSERT_GT(n, 0);
+            sent += static_cast<size_t>(n);
+        }
+        fr_buf_destroy(&payload);
+        fr_buf_destroy(&frame);
+#if defined(_WIN32)
+        ::closesocket(fd);
+#else
+        ::close(fd);
+#endif
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
@@ -207,7 +268,8 @@ TEST_F(M5ConcurrencyTest, AbruptDisconnectCleanedAndServerSurvives) {
 }
 
 /// 重复提交同一块：幂等成功（FR-UP-06）。
-TEST_F(M5ConcurrencyTest, DuplicateChunkSubmissionIdempotent) {
+TEST_F(M5ConcurrencyTest, DuplicateChunkSubmissionIdempotent)
+{
     auto publisher = make_client(publisher_token_);
     const std::string content(1024 * 1024, 'R');
     fr::Sha256Stream overall;

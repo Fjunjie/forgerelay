@@ -18,7 +18,8 @@ namespace {
 
 class M5ErrorTest : public ::testing::Test {
 protected:
-    void SetUp() override {
+    void SetUp() override
+    {
         root_ =
             std::filesystem::path(::testing::TempDir()) / ("fr_m5e_" + std::to_string(++counter_));
         std::filesystem::remove_all(root_);
@@ -43,7 +44,8 @@ protected:
         server_ = fr::Server::start(settings_, *storage_, *dispatcher_, log_, hub_.get());
     }
 
-    void TearDown() override {
+    void TearDown() override
+    {
         server_->stop();
         auth_.reset();
         storage_.reset();
@@ -51,7 +53,8 @@ protected:
         std::filesystem::remove_all(root_, ec);
     }
 
-    std::unique_ptr<fr::Client> make_client(const std::string &token) {
+    std::unique_ptr<fr::Client> make_client(const std::string &token)
+    {
         fr::ClientOptions options;
         options.host = "127.0.0.1";
         options.port = server_->port();
@@ -63,7 +66,8 @@ protected:
     }
 
     /** 发送一个原始帧（绕过消息编码，直接控制字节）。 */
-    void send_raw(fr::Client &client, uint8_t type, const void *payload, size_t len) {
+    void send_raw(fr::Client &client, uint8_t type, const void *payload, size_t len)
+    {
         client.send_raw_frame(type, payload, len);
     }
 
@@ -84,7 +88,8 @@ protected:
 int M5ErrorTest::counter_ = 0;
 
 /// 协议破坏（垃圾字节/坏 magic/坏 CRC）：连接被关闭，服务端存活。
-TEST_F(M5ErrorTest, ProtocolViolationClosesConnectionServerSurvives) {
+TEST_F(M5ErrorTest, ProtocolViolationClosesConnectionServerSurvives)
+{
     auto bad = make_client(publisher_token_);
     bad->send_garbage("GARBAGE-NOT-A-FRAME");
     // 服务端应关闭连接：后续收发必然失败。
@@ -96,7 +101,8 @@ TEST_F(M5ErrorTest, ProtocolViolationClosesConnectionServerSurvives) {
 }
 
 /// 不存在的资源：NOTFOUND（FR-E 语义，非崩溃）。
-TEST_F(M5ErrorTest, NotFoundResources) {
+TEST_F(M5ErrorTest, NotFoundResources)
+{
     auto admin = make_client(admin_token_);
     EXPECT_THROW(admin->show_artifact("nope", "nope", "nope"), fr::Error);
     EXPECT_THROW((void)admin->delete_artifact("nope", "nope", "nope"), fr::Error);
@@ -110,7 +116,8 @@ TEST_F(M5ErrorTest, NotFoundResources) {
 }
 
 /// 非法标识符：创建会话时拒绝（SEC-05）。
-TEST_F(M5ErrorTest, InvalidIdentifiersRejected) {
+TEST_F(M5ErrorTest, InvalidIdentifiersRejected)
+{
     auto publisher = make_client(publisher_token_);
     const std::string digest = fr::sha256_to_hex(fr::sha256("x", 1));
     EXPECT_THROW(publisher->create_upload("bad ns", "app", "1.0", 1, digest), fr::Error);
@@ -123,7 +130,8 @@ TEST_F(M5ErrorTest, InvalidIdentifiersRejected) {
 }
 
 /// 无效令牌：认证失败，错误码为 UNAUTHENTICATED（FR-AUTH）。
-TEST_F(M5ErrorTest, InvalidTokenRejectedWithStableCode) {
+TEST_F(M5ErrorTest, InvalidTokenRejectedWithStableCode)
+{
     try {
         auto bad = make_client("fr_" + std::string(64, 'e'));
         (void)bad->status();
@@ -137,7 +145,8 @@ TEST_F(M5ErrorTest, InvalidTokenRejectedWithStableCode) {
 }
 
 /// 坏参数：非法块序号/长度被拒绝（FR-UP-05/边界）。
-TEST_F(M5ErrorTest, BadChunkParametersRejected) {
+TEST_F(M5ErrorTest, BadChunkParametersRejected)
+{
     auto publisher = make_client(publisher_token_);
     const std::string content(1024 * 1024, 'p');
     fr::Sha256Stream overall;
@@ -146,14 +155,18 @@ TEST_F(M5ErrorTest, BadChunkParametersRejected) {
     const fr::msg::CreateUploadOk session =
         publisher->create_upload("ci", "badparam", "1.0", content.size(), digest);
 
-    EXPECT_THROW(publisher->put_chunk(session.session_id, 5, content.data(), content.size()),
-                 fr::Error); // 序号越界
+    EXPECT_THROW(
+        publisher->put_chunk(session.session_id, 5, content.data(), content.size()),
+        fr::Error); // 序号越界
     /* 唯一（末）块的 put 允许部分长度（提交时校验总长，FR-UP-08）。 */
     EXPECT_NO_THROW(publisher->put_chunk(session.session_id, 0, content.data(), 1));
-    EXPECT_THROW(publisher->put_chunk(session.session_id, 0, content.data(), content.size()),
-                 fr::Error); // 同编号不同内容 → FR_E_CONFLICT（FR-UP-06）
+    EXPECT_THROW(
+        publisher->put_chunk(session.session_id, 0, content.data(), content.size()),
+        fr::Error); // 同编号不同内容 → FR_E_CONFLICT（FR-UP-06）
     EXPECT_THROW((void)publisher->commit_upload(session.session_id), fr::Error); // 总长不符
-    // 会话回 OPEN：通过再次成功 put 验证（FR-UP-08 失败回滚）。
+    /* 会话已回 OPEN（FR-UP-08 失败回滚）：COMMITTING 卡死时 put 会被拒绝，
+     * 故重复上传同内容块（幂等，FR-UP-06）成功即为回滚到 OPEN 的证据。 */
+    EXPECT_NO_THROW(publisher->put_chunk(session.session_id, 0, content.data(), 1));
 }
 
 } // namespace

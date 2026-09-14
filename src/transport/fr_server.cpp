@@ -6,16 +6,18 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <map>
 #include <mutex>
 #include <thread>
 #include <vector>
-#include <cstdio>
 
 #include "forgerelay/log.hpp"
 #include "forgerelay/service.hpp"
 #include "forgerelay/storage/error.hpp"
+// tls.hpp 按 FR_HAVE_OPENSSL 自门控（无 TLS 构建下为空），无条件包含是安全的。
+#include "forgerelay/tls.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -283,8 +285,8 @@ public:
 #if defined(_WIN32)
         pollfd poll_entry{};
         poll_entry.fd = fd;
-        poll_entry.events = static_cast<short>(
-            (readable ? POLLRDNORM : 0) | (writable ? POLLWRNORM : 0));
+        poll_entry.events =
+            static_cast<short>((readable ? POLLRDNORM : 0) | (writable ? POLLWRNORM : 0));
         poll_entry.revents = 0;
         fds_.push_back(poll_entry);
 #else
@@ -302,8 +304,8 @@ public:
 #if defined(_WIN32)
         for (pollfd &poll_entry : fds_) {
             if (poll_entry.fd == fd) {
-                poll_entry.events = static_cast<short>(
-                    (readable ? POLLRDNORM : 0) | (writable ? POLLWRNORM : 0));
+                poll_entry.events =
+                    static_cast<short>((readable ? POLLRDNORM : 0) | (writable ? POLLWRNORM : 0));
                 return;
             }
         }
@@ -336,8 +338,8 @@ public:
     {
         out.clear();
 #if defined(_WIN32)
-        const int n = ::WSAPoll(fds_.data(), static_cast<ULONG>(fds_.size()),
-                                static_cast<INT>(timeout_ms));
+        const int n =
+            ::WSAPoll(fds_.data(), static_cast<ULONG>(fds_.size()), static_cast<INT>(timeout_ms));
         if (n <= 0) {
             return;
         }
@@ -443,9 +445,9 @@ struct Server::Impl {
         std::string peer;
         uint8_t type = 0;
         uint32_t req_id = 0;
-        std::vector<uint8_t> payload;      // 请求负载拷贝
-        bool is_get_continue = false;      // true 时续传下载分片
-        std::string get_key;               // 续传状态键
+        std::vector<uint8_t> payload; // 请求负载拷贝
+        bool is_get_continue = false; // true 时续传下载分片
+        std::string get_key;          // 续传状态键
     };
 
     std::mutex queue_mu;
@@ -489,7 +491,8 @@ struct Server::Impl {
     {
         /* 背压（§7.1）：完成队列超过高水位时阻塞工作线程。 */
         std::unique_lock<std::mutex> lock(done_mu);
-        done_cv.wait(lock, [&] { return stopping.load() || done_queue.size() < kDoneQueueHighWater; });
+        done_cv.wait(
+            lock, [&] { return stopping.load() || done_queue.size() < kDoneQueueHighWater; });
         done_queue.push_back(std::move(completion));
         done_cv.notify_one();
     }
@@ -602,18 +605,18 @@ struct Server::Impl {
                 fr_buf err_payload;
                 fr_buf_init(&err_payload);
                 fr::msg::encode_error_payload(err_payload, err.code(), err.what());
-                fr_frame_encode(&result.out, FR_MSG_ERROR, 0,
-                                task.req_id == 0 ? 1u : task.req_id, err_payload.data,
-                                err_payload.len);
+                fr_frame_encode(
+                    &result.out, FR_MSG_ERROR, 0, task.req_id == 0 ? 1u : task.req_id,
+                    err_payload.data, err_payload.len);
                 fr_buf_destroy(&err_payload);
             } catch (const std::exception &err) {
                 fr_buf_clear(&result.out);
                 fr_buf err_payload;
                 fr_buf_init(&err_payload);
                 fr::msg::encode_error_payload(err_payload, FR_E_INTERNAL, err.what());
-                fr_frame_encode(&result.out, FR_MSG_ERROR, 0,
-                                task.req_id == 0 ? 1u : task.req_id, err_payload.data,
-                                err_payload.len);
+                fr_frame_encode(
+                    &result.out, FR_MSG_ERROR, 0, task.req_id == 0 ? 1u : task.req_id,
+                    err_payload.data, err_payload.len);
                 fr_buf_destroy(&err_payload);
             }
 
@@ -690,10 +693,9 @@ struct Server::Impl {
 
     static int64_t now_monotonic()
     {
-        return static_cast<int64_t>(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now().time_since_epoch())
-                .count());
+        return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
     }
 
     void io_loop()
@@ -750,9 +752,20 @@ struct Server::Impl {
             if (conn.tls && conn.tls_handshaking) {
                 bool want_read = false;
                 bool want_write = false;
-                if (conn.tls->drive_handshake(want_read, want_write) == 1) {
+                const int hs = conn.tls->drive_handshake(want_read, want_write);
+                if (hs == 1) {
                     conn.tls_handshaking = false;
                     poller.mod(conn.fd, true, conn.outbox.len != 0);
+                    return;
+                }
+                if (hs < 0) {
+                    /* 握手致命错误：立即关闭，避免僵尸连接占用槽位直到空闲扫描
+                     * （drive_handshake 内部已清理 OpenSSL 错误队列）。 */
+                    if (log != nullptr) {
+                        log->warn(
+                            "TLS handshake failed from " + conn.peer + ", closing connection");
+                    }
+                    close_connection_locked(conn_id, poller);
                     return;
                 }
                 conn.tls_want_read = want_read;
@@ -799,11 +812,11 @@ struct Server::Impl {
                     size_t consumed = 0;
                     fr_frame frame{};
                     bool ready = false;
-                    const fr_status st = fr_frame_parser_feed(&conn.parser, cursor, left,
-                                                              &consumed, &frame, &ready);
+                    const fr_status st =
+                        fr_frame_parser_feed(&conn.parser, cursor, left, &consumed, &frame, &ready);
                     if (st != FR_OK) {
-                        send_error_locked(conn, frame.req_id, st,
-                                          "protocol violation, closing connection");
+                        send_error_locked(
+                            conn, frame.req_id, st, "protocol violation, closing connection");
                         conn.close_after_flush = true;
                         keep = false;
                         break;
@@ -824,8 +837,8 @@ struct Server::Impl {
                             task.type = frame.type;
                             task.req_id = frame.req_id;
                             if (frame.payload != nullptr) {
-                                task.payload.assign(frame.payload,
-                                                    frame.payload + frame.payload_len);
+                                task.payload.assign(
+                                    frame.payload, frame.payload + frame.payload_len);
                             }
                             queue.push_back(std::move(task));
                             enqueued = true;
@@ -872,8 +885,8 @@ struct Server::Impl {
         fr::msg::encode_error_payload(payload, code, message != nullptr ? message : "error");
         fr_buf out;
         fr_buf_init(&out);
-        (void)fr_frame_encode(&out, FR_MSG_ERROR, 0, req_id == 0 ? 1 : req_id, payload.data,
-                              payload.len);
+        (void)fr_frame_encode(
+            &out, FR_MSG_ERROR, 0, req_id == 0 ? 1 : req_id, payload.data, payload.len);
         fr_buf_append(&conn.outbox, out.data, out.len);
         fr_buf_destroy(&out);
         fr_buf_destroy(&payload);
@@ -942,9 +955,9 @@ Server::~Server()
     stop();
 }
 
-std::unique_ptr<Server> Server::start(const ServerSettings &settings, Storage &storage,
-                                      Dispatcher &dispatcher, Logger &logger,
-                                      StatusHub *status_hub)
+std::unique_ptr<Server> Server::start(
+    const ServerSettings &settings, Storage &storage, Dispatcher &dispatcher, Logger &logger,
+    StatusHub *status_hub)
 {
     auto server = std::unique_ptr<Server>(new Server());
     server->impl_ = std::unique_ptr<Impl>(new Impl());
@@ -989,8 +1002,10 @@ std::unique_ptr<Server> Server::start(const ServerSettings &settings, Storage &s
     }
 #else
     if (settings.tls.enabled) {
-        throw_error(FR_E_ARG, "TLS backend unavailable in this build (no OpenSSL); "
-                              "use a loopback listener with tls.enabled = false (D-20)");
+        throw_error(
+            FR_E_ARG,
+            "TLS backend unavailable in this build (no OpenSSL); "
+            "use a loopback listener with tls.enabled = false (D-20)");
     }
 #endif
 

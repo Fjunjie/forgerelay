@@ -115,9 +115,15 @@ void Session::connect_client(const ClientCtx &ctx, int fd, const std::string &ho
     if (ssl_ == nullptr) {
         throw_error(FR_E_IO, openssl_errors("SSL_new(client) failed"));
     }
-    /* SNI + 主机名校验（SEC-02）。 */
-    SSL_set_tlsext_host_name(ssl_, hostname.c_str());
-    SSL_set1_host(ssl_, hostname.c_str());
+    /* SNI + 主机名校验（SEC-02）：任一设置失败即中止，不允许静默跳过校验
+     * （否则 SSL_VERIFY_PEER 只验证证书链信任，任意可信 CA 签发的主机名均可通过）。 */
+    if (SSL_set_tlsext_host_name(ssl_, hostname.c_str()) != 1 ||
+        SSL_set1_host(ssl_, hostname.c_str()) != 1) {
+        std::string msg = openssl_errors("set SNI/hostname verification failed");
+        SSL_free(ssl_);
+        ssl_ = nullptr;
+        throw_error(FR_E_IO, msg + " (" + hostname + ")");
+    }
     if (SSL_set_fd(ssl_, fd) != 1) {
         std::string msg = openssl_errors("SSL_set_fd failed");
         SSL_free(ssl_);
@@ -171,13 +177,12 @@ int Session::read(unsigned char *buf, int len)
         return rc;
     }
     const int err = SSL_get_error(ssl_, rc);
-    if (err == SSL_ERROR_ZERO_RETURN) {
-        return 0; // 对端有序关闭
-    }
     if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-        return -1; // 与明文路径的"暂无数据"语义一致（调用方映射）
+        return 0; // 暂无数据，等待下次就绪（与明文 read_some 语义一致，tls.hpp 契约）
     }
     ERR_clear_error();
+    /* SSL_ERROR_ZERO_RETURN（对端 close_notify）与其余错误一律视为连接终止：
+     * EOF 后 socket 永久可读，若返回 0 会让电平触发的轮询空转到空闲扫描。 */
     return -1;
 }
 
